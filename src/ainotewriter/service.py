@@ -14,8 +14,7 @@ import requests
 import html
 import re
 import logging
- 
-# Module logger
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,14 +93,15 @@ class CommunityNoteWriterService:
                     continue
 
                 _progress("Generating note draft...")
-                draft = self.ai.generate_note(pwc)
+                gen_result = self.ai.generate_note(pwc)
+                draft = gen_result.draft
                 if draft is None:
-                    _progress("Skipped: no reliable note generated")
+                    _progress(f"Skipped: {gen_result.reason}")
                     results.append(
                         NoteProcessResult(
                             post_id=pwc.post.post_id,
                             status="skipped",
-                            reason="No reliable note generated",
+                            reason=gen_result.reason,
                         )
                     )
                     continue
@@ -135,7 +135,6 @@ class CommunityNoteWriterService:
                     _progress("Submitting note...")
 
                     if enable_url_check:
-                        # Prefer parsing URLs from the generated note text; fall back to suggested_source_links.
                         parsed_variants = _extract_urls(unescape(draft.note_text))
                         ok = True
                         bad_urls: list[str] = []
@@ -225,7 +224,6 @@ class CommunityNoteWriterService:
         if isinstance(data, list):
             notes["data"] = sorted(data, key=self._note_sort_key)
 
-        # Compliance check must be based on most recent 50 notes in test_mode.
         stats_source = self.x_client.get_notes_written(max_results=50, test_mode=True)
         recent_data = stats_source.get("data", []) if isinstance(stats_source, dict) else []
         if isinstance(recent_data, list):
@@ -341,14 +339,6 @@ class CommunityNoteWriterService:
 
 
 def check_all_urls_for_note(note_text: str, check_url_fn: Callable[[str], bool]) -> tuple[bool, list[str]]:
-    """
-    Copyed from twitter/communitynotes
-
-    Check all URLs in the note text to see if they are valid.
-    For each URL, there are multiple variants (e.g. with and without trailing punctuation).
-    If at least one variant of each URL is valid, return (True, []).
-    If there is any URL with no valid variant, return (False, [bad_variants...]).
-    """
     note_text_unescaped = unescape(note_text)
     urls = _extract_urls(note_text_unescaped)
 
@@ -375,13 +365,6 @@ def check_all_urls_for_note(note_text: str, check_url_fn: Callable[[str], bool])
 
 
 def _extract_urls(text: str) -> List[List[str]]:
-    """
-    Copyed from twitter/communitynotes
-
-    Return every URL-like substring from *text*.
-    Return a List of Lists: each inner List contains multiple possible variants
-    of an individual URL.
-    """
     pattern = re.compile(
         r"""
             (?:
@@ -389,7 +372,7 @@ def _extract_urls(text: str) -> List[List[str]]:
             )?
             (?:www\.)?                  # optional www
             [\w\-._~%]+                 # subdomain or domain name chars
-            \.[a-zA-Z]{2,}              # dot + top level domain (≥2 letters)
+            \.[a-zA-Z]{2,}              # dot + top level domain
             (?:/[^\s]*)?                # optional query/fragment
             """,
         re.VERBOSE,
@@ -397,12 +380,9 @@ def _extract_urls(text: str) -> List[List[str]]:
 
     raw_matches = pattern.findall(text)
 
-    # Strip common trailing punctuation that often follows URLs in note text
-    # Return both variants (with and without trailing punctuation) for each URL.
     strip_trailing = ".,;:!?)]}\"'"
     results = []
     for match in raw_matches:
-        # Create a list of variants for each match
         variants = [match]
         stripped_variant = match.rstrip(strip_trailing)
         if stripped_variant != match:
@@ -412,7 +392,6 @@ def _extract_urls(text: str) -> List[List[str]]:
 
 
 def unescape(text: str) -> str:
-    """Remove layers of HTML escaping so the text matches natural language."""
     return html.unescape(html.unescape(text)) if isinstance(text, str) else text
 
 

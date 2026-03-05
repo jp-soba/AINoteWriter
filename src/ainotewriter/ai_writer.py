@@ -30,7 +30,7 @@ class AINoteDraft:
 @dataclass
 class NoteGenerationResult:
     draft: AINoteDraft | None
-    reason: str  # "ok" / "no_note_needed" / "not_enough_evidence" / "no_url" / "hashtag" / "ai_error" / "disabled"
+    reason: str
 
 
 class AINoteGenerator:
@@ -168,9 +168,9 @@ class AINoteGenerator:
         cmd = [self.config.claude_cli_path, "--print"]
         if allow_web_tools:
             cmd += ["--allowedTools", "WebSearch,WebFetch"]
-        cmd.append(full_prompt)
         proc = subprocess.run(
             cmd,
+            input=full_prompt,
             capture_output=True,
             text=True,
             timeout=self.config.ai_timeout_sec,
