@@ -1,6 +1,8 @@
 name: Automated Community Note Writer
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       num_posts:
