@@ -94,14 +94,15 @@ class CommunityNoteWriterService:
                     continue
 
                 _progress("Generating note draft...")
-                draft = self.ai.generate_note(pwc)
+                gen_result = self.ai.generate_note(pwc)
+                draft = gen_result.draft
                 if draft is None:
-                    _progress("Skipped: no reliable note generated")
+                    _progress(f"Skipped: {gen_result.reason}")
                     results.append(
                         NoteProcessResult(
                             post_id=pwc.post.post_id,
                             status="skipped",
-                            reason="No reliable note generated",
+                            reason=gen_result.reason,
                         )
                     )
                     continue

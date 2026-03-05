@@ -10,9 +10,12 @@ from typing import Any
 
 import requests
 
+import logging
+
 from .config import AppConfig
 from .models import PostWithContext
 
+logger = logging.getLogger(__name__)
 
 NO_NOTE_NEEDED = "NO NOTE NEEDED"
 NOT_ENOUGH_EVIDENCE = "NOT ENOUGH EVIDENCE TO WRITE A GOOD COMMUNITY NOTE"
@@ -22,6 +25,12 @@ NOT_ENOUGH_EVIDENCE = "NOT ENOUGH EVIDENCE TO WRITE A GOOD COMMUNITY NOTE"
 class AINoteDraft:
     note_text: str
     misleading_tags: list[str]
+
+
+@dataclass
+class NoteGenerationResult:
+    draft: AINoteDraft | None
+    reason: str  # "ok" / "no_note_needed" / "not_enough_evidence" / "no_url" / "hashtag" / "ai_error" / "disabled"
 
 
 class AINoteGenerator:
@@ -269,7 +278,8 @@ class AINoteGenerator:
                     prompt=user_prompt,
                     system_prompt="あなたは慎重な調査アシスタントです。公開情報のみを使い、根拠URLを明示してください。",
                 )
-            except Exception:
+            except Exception as ex:
+                logger.warning("Live search failed (claude): %s", ex)
                 return ""
 
         # xAI: migrate from deprecated `search_parameters` to Agent Tools style.
@@ -296,7 +306,8 @@ class AINoteGenerator:
             }
             try:
                 return self._chat_completion(chat_payload)
-            except Exception:
+            except Exception as ex:
+                logger.warning("Live search failed (xai chat): %s", ex)
                 # Fallback: Responses API with built-in tool.
                 responses_payload: dict[str, Any] = {
                     "model": self.config.ai_model,
@@ -310,7 +321,8 @@ class AINoteGenerator:
                 }
                 try:
                     return self._responses_completion(responses_payload)
-                except Exception:
+                except Exception as ex:
+                    logger.warning("Live search failed (xai responses): %s", ex)
                     return ""
 
         payload: dict[str, Any] = {
@@ -329,51 +341,60 @@ class AINoteGenerator:
         }
         try:
             return self._chat_completion(payload)
-        except Exception:
+        except Exception as ex:
+            logger.warning("Live search failed: %s", ex)
             return ""
 
-    def generate_note(self, post_with_context: PostWithContext) -> AINoteDraft | None:
+    def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
         provider = self.config.ai_provider.lower()
         if provider in {"none", "off", "disabled"}:
-            return None
+            return NoteGenerationResult(draft=None, reason="disabled")
 
         description = self._build_post_description(post_with_context)
         search_results = self._run_live_search(description)
         note_prompt = self._get_prompt_for_note_writing(description, search_results)
 
-        if provider in {"claude", "claude_agent", "claude-agent"}:
-            raw = self._claude_completion(
-                prompt=note_prompt,
-                system_prompt="あなたはCommunity Notes向けの事実確認ライターです。推測はせず、検証可能な事実のみを使ってください。",
-            )
-        else:
-            payload: dict[str, Any] = {
-                "model": self.config.ai_model,
-                "temperature": 0.3,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "あなたはCommunity Notes向けの事実確認ライターです。",
-                    },
-                    {
-                        "role": "user",
-                        "content": note_prompt,
-                    },
-                ],
-            }
-            raw = self._chat_completion(payload)
+        try:
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(
+                    prompt=note_prompt,
+                    system_prompt="あなたはCommunity Notes向けの事実確認ライターです。推測はせず、検証可能な事実のみを使ってください。",
+                )
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.3,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "あなたはCommunity Notes向けの事実確認ライターです。",
+                        },
+                        {
+                            "role": "user",
+                            "content": note_prompt,
+                        },
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Note generation failed: %s", ex)
+            return NoteGenerationResult(draft=None, reason=f"ai_error ({ex})")
+
         upper = raw.upper()
-        if NO_NOTE_NEEDED in upper or NOT_ENOUGH_EVIDENCE in upper:
-            return None
+        if NO_NOTE_NEEDED in upper:
+            return NoteGenerationResult(draft=None, reason="no_note_needed")
+        if NOT_ENOUGH_EVIDENCE in upper:
+            return NoteGenerationResult(draft=None, reason="not_enough_evidence")
 
         urls = self._extract_urls(raw)
         if not urls:
-            return None
+            return NoteGenerationResult(draft=None, reason="no_url")
         if "#" in raw:
-            return None
+            return NoteGenerationResult(draft=None, reason="hashtag")
 
         note_text = raw.strip()
-        return AINoteDraft(
+        draft = AINoteDraft(
             note_text=note_text,
             misleading_tags=["missing_important_context"],
         )
+        return NoteGenerationResult(draft=draft, reason="ok")
