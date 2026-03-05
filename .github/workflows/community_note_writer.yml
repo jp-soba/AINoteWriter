@@ -27,6 +27,14 @@ on:
         description: "Timeout (seconds) for URL checks"
         required: false
         default: "5"
+      ai_provider:
+        description: "AI provider (xai / claude_agent)"
+        required: false
+        default: "xai"
+        type: choice
+        options:
+          - xai
+          - claude_agent
   # schedule:
   #   - cron: "0 * * * *"
 
@@ -48,16 +56,21 @@ jobs:
           pip install -r requirements.txt
           pip install -e .
 
+      - name: Install Claude CLI
+        if: ${{ (github.event.inputs.ai_provider || vars.AI_PROVIDER) == 'claude_agent' }}
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Run writer
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_PROVIDER: ${{ github.event.inputs.ai_provider || vars.AI_PROVIDER }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_MODEL: ${{ vars.AI_MODEL }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           ai-note-writer run \
             --num-posts "${{ github.event.inputs.num_posts || '5' }}" \

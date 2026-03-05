@@ -142,6 +142,17 @@ GitHub リポジトリの `Settings > Secrets and variables > Actions` で以下
   - `CLAUDE_MAX_TURNS`（例: `4`）
   - `CLAUDE_USE_CLI_FALLBACK`（例: `true`）
 
+### Claude Code（`claude_agent`）を GitHub Actions で使う場合
+
+1. ローカル環境で `claude setup-token` を実行し、表示されたトークンをコピー
+2. GitHub リポジトリの `Settings > Secrets and variables > Actions > Secrets` で
+   `CLAUDE_CODE_OAUTH_TOKEN` として登録
+3. ワークフローの手動実行時に `ai_provider` で `claude_agent` を選択
+   （または Variables で `AI_PROVIDER=claude_agent` を設定）
+
+> GitHub Actions 上では Agent SDK は使用せず、`claude --print` フォールバックで動作します。
+> 認証には `CLAUDE_CODE_OAUTH_TOKEN` が使われるため、`AI_API_KEY` は不要です。
+
 Actions タブから `Automated Community Note Writer` を手動実行できます。
 成果物は artifact (`writer-outputs`) として保存されます。
 
