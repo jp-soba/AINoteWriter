@@ -1,18 +1,40 @@
-name: Get Notes Written
+name: Automated Community Note Writer
+
+concurrency:
+  group: note-writer
+  cancel-in-progress: false
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
-      max_results:
-        description: "Number of eligible notes"
+      num_posts:
+        description: "Number of eligible posts to process"
         required: false
         default: "10"
       test_mode:
         description: "Use test_mode"
         required: false
         default: "true"
-  # schedule:
-  #   - cron: "0 * * * *"
+      submit_notes:
+        description: "Submit notes to X API"
+        required: false
+        default: "true"
+      evaluate_before_submit:
+        description: "Call evaluate_note before submit"
+        required: false
+        default: "true"
+      enable_url_check:
+        description: "Enable URL validity check before submit"
+        required: false
+        default: "true"
+      url_check_timeout:
+        description: "Timeout (seconds) for URL checks"
+        required: false
+        default: "5"
+  schedule:
+    - cron: "*/30 * * * *"
 
 jobs:
   run-note-writer:
@@ -32,20 +54,35 @@ jobs:
           pip install -r requirements.txt
           pip install -e .
 
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Restore processed posts cache
+        uses: actions/cache@v4
+        with:
+          path: outputs/processed_posts.json
+          key: processed-posts-${{ github.run_id }}
+          restore-keys: processed-posts-
+
       - name: Run writer
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_PROVIDER: claude_agent
+          AI_TIMEOUT_SEC: "300"
           AI_MODEL: ${{ vars.AI_MODEL }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          ai-note-writer notes \
-            --test-mode ${{ github.event.inputs.test_mode || 'true' }} \
-            --max-results "${{ github.event.inputs.max_results || '10' }}"
+          ai-note-writer run \
+            --num-posts "${{ github.event.inputs.num_posts || '10' }}" \
+            --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
+            --submit-notes=${{ github.event.inputs.submit_notes || 'true' }} \
+            --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
+            --enable-url-check=${{ github.event.inputs.enable_url_check || 'true' }} \
+            --url-check-timeout "${{ github.event.inputs.url_check_timeout || '5' }}"
 
       - name: Upload outputs
         if: always()

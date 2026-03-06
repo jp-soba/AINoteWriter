@@ -29,8 +29,8 @@ on:
         description: "Timeout (seconds) for URL checks"
         required: false
         default: "5"
-  # schedule:
-  #   - cron: "0 * * * *"
+  schedule:
+    - cron: "*/30 * * * *"
 
 jobs:
   run-note-writer:
