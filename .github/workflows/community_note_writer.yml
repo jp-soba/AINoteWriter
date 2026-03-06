@@ -1,5 +1,9 @@
 name: Automated Community Note Writer
 
+concurrency:
+  group: note-writer
+  cancel-in-progress: false
+
 on:
   push:
     branches: [master]
