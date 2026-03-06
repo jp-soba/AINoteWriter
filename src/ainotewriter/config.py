@@ -21,6 +21,7 @@ class AppConfig:
     x_api_key_secret: str
     x_access_token: str
     x_access_token_secret: str
+    x_bearer_token: str = ""
     x_api_base_url: str = "https://api.x.com/2"
 
     ai_provider: str = "xai"
@@ -32,6 +33,8 @@ class AppConfig:
     claude_max_turns: int = 4
     claude_use_cli_fallback: bool = True
 
+    discord_webhook_url: str = ""
+
     default_num_posts: int = 5
     default_test_mode: bool = True
     default_submit_notes: bool = False
@@ -40,7 +43,6 @@ class AppConfig:
     default_enable_url_check: bool = False
     url_check_timeout_sec: int = 5
 
-
     @classmethod
     def from_env(cls) -> "AppConfig":
         return cls(
@@ -48,6 +50,7 @@ class AppConfig:
             x_api_key_secret=os.getenv("X_API_KEY_SECRET", ""),
             x_access_token=os.getenv("X_ACCESS_TOKEN", ""),
             x_access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET", ""),
+            x_bearer_token=os.getenv("X_BEARER_TOKEN", ""),
             x_api_base_url=os.getenv("X_API_BASE_URL", "https://api.x.com/2"),
             ai_provider=os.getenv("AI_PROVIDER", "xai"),
             ai_api_key=os.getenv("AI_API_KEY", ""),
@@ -59,6 +62,7 @@ class AppConfig:
             claude_use_cli_fallback=_as_bool(
                 os.getenv("CLAUDE_USE_CLI_FALLBACK"), True
             ),
+            discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
             default_num_posts=int(os.getenv("DEFAULT_NUM_POSTS", "5")),
             default_test_mode=_as_bool(os.getenv("DEFAULT_TEST_MODE"), True),
             default_submit_notes=_as_bool(os.getenv("DEFAULT_SUBMIT_NOTES"), False),

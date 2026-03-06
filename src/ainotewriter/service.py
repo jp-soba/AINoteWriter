@@ -18,6 +18,61 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _send_discord_notification(
+    webhook_url: str,
+    post_id: str,
+    note_text: str,
+    evaluation: dict[str, Any] | None,
+    test_mode: bool,
+    progress_label: str,
+) -> None:
+    if not webhook_url:
+        return
+
+    embeds: list[dict[str, Any]] = [
+        {
+            "title": "ノート案",
+            "description": note_text[:4096],
+            "color": 0x1DA1F2,
+        }
+    ]
+
+    if evaluation is not None:
+        data = evaluation.get("data", {}) if isinstance(evaluation, dict) else {}
+        score = data.get("claim_opinion_score")
+        lines: list[str] = []
+        if score is not None:
+            lines.append(f"claim_opinion_score: **{score}**")
+        for key, value in data.items():
+            if key == "claim_opinion_score":
+                continue
+            lines.append(f"{key}: {value}")
+        if not lines:
+            lines.append("(データなし)")
+        embeds.append(
+            {
+                "title": "評価結果",
+                "description": "\n".join(lines)[:4096],
+                "color": 0x2ECC71 if score is not None and score < 0.55 else 0xE74C3C,
+            }
+        )
+
+    mode_label = "テストモード" if test_mode else "本番モード"
+    embeds[-1]["footer"] = {"text": f"{mode_label} | {progress_label}"}
+
+    payload = {
+        "content": f"https://x.com/i/status/{post_id}",
+        "embeds": embeds,
+    }
+
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        if not resp.ok:
+            logger.warning("Discord webhook failed (%s): %s", resp.status_code, resp.text)
+    except Exception as ex:
+        logger.warning("Discord webhook error: %s", ex)
+
+
 class CommunityNoteWriterService:
     def __init__(self, config: AppConfig):
         self.config = config
@@ -107,31 +162,47 @@ class CommunityNoteWriterService:
                     continue
 
                 score = None
+                evaluation = None
                 if evaluate_before_submit:
                     _progress("Evaluating note quality...")
-                    evaluation = self.x_client.evaluate_note(
-                        post_id=pwc.post.post_id,
-                        note_text=draft.note_text,
-                    )
-                    logger.info("Evaluation response: %s", evaluation)
-                    score = (
-                        evaluation.get("data", {}).get("claim_opinion_score")
-                        if isinstance(evaluation, dict)
-                        else None
-                    )
-                    _progress(f"claim_opinion_score={score}")
-                    if score is not None and score < min_claim_opinion_score:
-                        _progress(f"Skipped: claim_opinion_score too low ({score})")
-                        results.append(
-                            NoteProcessResult(
-                                post_id=pwc.post.post_id,
-                                status="skipped",
-                                reason=f"claim_opinion_score too low: {score}",
-                                generated_note=draft.note_text,
-                                claim_opinion_score=score,
-                            )
+                    try:
+                        evaluation = self.x_client.evaluate_note(
+                            post_id=pwc.post.post_id,
+                            note_text=draft.note_text,
                         )
-                        continue
+                        logger.info("Evaluation response: %s", evaluation)
+                        score = (
+                            evaluation.get("data", {}).get("claim_opinion_score")
+                            if isinstance(evaluation, dict)
+                            else None
+                        )
+                        _progress(f"claim_opinion_score={score}")
+                    except Exception as eval_ex:
+                        _progress(f"Evaluation failed: {eval_ex}")
+                        evaluation = {"error": str(eval_ex)}
+
+                progress_label = f"{idx}/{len(posts)}"
+                _send_discord_notification(
+                    webhook_url=self.config.discord_webhook_url,
+                    post_id=pwc.post.post_id,
+                    note_text=draft.note_text,
+                    evaluation=evaluation,
+                    test_mode=test_mode,
+                    progress_label=progress_label,
+                )
+
+                if score is not None and score < min_claim_opinion_score:
+                    _progress(f"Skipped: claim_opinion_score too low ({score})")
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason=f"claim_opinion_score too low: {score}",
+                            generated_note=draft.note_text,
+                            claim_opinion_score=score,
+                        )
+                    )
+                    continue
 
                 if submit_notes:
                     _progress("Submitting note...")
