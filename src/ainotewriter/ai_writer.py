@@ -602,18 +602,33 @@ class AINoteGenerator:
             return ""
 
     def _parse_eval_result(self, raw: str) -> tuple[str, str]:
-        """Parse self-evaluation response. Returns (verdict, detail).
-        verdict is one of: "pass", "improve", "fail"
-        """
-        first_line = raw.strip().split("\n")[0].strip().strip("*").strip()
-        upper = first_line.upper()
+            """Parse self-evaluation response. Returns (verdict, detail).
+            verdict is one of: "pass", "improve", "fail"
+            """
+            cleaned = raw.strip()
 
-        if "PASS" in upper:
-            return ("pass", "")
-        if upper.startswith("IMPROVE"):
-            detail = first_line.split(":", 1)[1].strip() if ":" in first_line else raw.strip()
-            return ("improve", detail)
-        return ("fail", raw.strip())
+            for line in cleaned.split("\n"):
+                line = line.strip().strip("*").strip("-").strip()
+                if not line:
+                    continue
+                upper = line.upper()
+
+                if upper.startswith("PASS"):
+                    return ("pass", "")
+                if upper.startswith("IMPROVE"):
+                    detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
+                    return ("improve", detail)
+                if upper.startswith("FAIL"):
+                    detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
+                    return ("fail", detail)
+
+            # No explicit verdict found - check entire text
+            upper_all = cleaned.upper()
+            if "PASS" in upper_all:
+                return ("pass", "")
+            if "IMPROVE" in upper_all:
+                return ("improve", cleaned)
+            return ("fail", cleaned)
 
     def _self_evaluate_note(
         self, post_with_context: PostWithContext, note_text: str
