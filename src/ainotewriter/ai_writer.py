@@ -355,6 +355,8 @@ class AINoteGenerator:
     - 事実主張ごとに根拠URLを併記する
     - URLは本文にそのまま書く（「出典:」などの飾りは不要）
     - 不確かな情報は推測せず、確認できる情報のみ示す
+    - 故人に対する未確認の噂や性的内容に関する主張は調査対象外とし、検索しないこと
+    - 裁判で認定された事実や公式報告のみを対象とすること
 
     調査対象:
     {post_with_context_description}
@@ -417,14 +419,46 @@ class AINoteGenerator:
 4. ノートに「～は確認できません」「～の根拠は見つかりません」「～は公開情報から確認できていません」のような、検索範囲の限界に基づく疑義が含まれていませんか？
 5. ノートの情報は、ポストを見た一般の読者にとって有益な文脈を提供していますか？
 
-すべての基準を満たす場合は「PASS」のみを返してください。
-いずれかの基準を満たさない場合は「FAIL: 理由」を返してください。
+判定:
+- すべての基準を満たす場合は「PASS」のみを返してください。
+- ノートの方向性は正しいが表現に改善の余地がある場合は「IMPROVE: 具体的な改善指示」を返してください。
+- 根本的にノートを書くべきでない場合（投稿を裏付けているだけ、一方的に党派的、等）のみ「FAIL: 理由」を返してください。
 
 [投稿]
 {post_with_context_description}
 
 [ノート案]
 {note_text}""".strip()
+
+    def _get_prompt_for_note_rewrite(
+        self,
+        post_with_context_description: str,
+        original_note: str,
+        feedback: str,
+        search_results: str,
+    ) -> str:
+        return f"""あなたはCommunity Notesの下書きを改善します。以下のフィードバックをもとに、ノートを書き直してください。
+
+書き直しルール:
+- フィードバックの指摘を反映する
+- それ以外のルールは元のノート作成時と同じ（280文字以内目安、丁寧語、URL必須、意見禁止等）
+- 改善できない場合は "NO NOTE NEEDED." と返す
+- ノート本文のみを返す（前置き不要）
+
+[投稿]
+{post_with_context_description}
+
+[元のノート]
+{original_note}
+
+[フィードバック]
+{feedback}
+
+[調査メモ]
+```
+{search_results}
+```
+""".strip()
 
     # ── Phase methods ──
 
@@ -529,9 +563,24 @@ class AINoteGenerator:
             logger.warning("Live search failed: %s", ex)
             return ""
 
+    def _parse_eval_result(self, raw: str) -> tuple[str, str]:
+        """Parse self-evaluation response. Returns (verdict, detail).
+        verdict is one of: "pass", "improve", "fail"
+        """
+        first_line = raw.strip().split("\n")[0].strip().strip("*").strip()
+        upper = first_line.upper()
+
+        if "PASS" in upper:
+            return ("pass", "")
+        if upper.startswith("IMPROVE"):
+            detail = first_line.split(":", 1)[1].strip() if ":" in first_line else raw.strip()
+            return ("improve", detail)
+        return ("fail", raw.strip())
+
     def _self_evaluate_note(
         self, post_with_context: PostWithContext, note_text: str
-    ) -> tuple[bool, str]:
+    ) -> tuple[str, str]:
+        """Returns (verdict, detail). verdict is "pass", "improve", or "fail"."""
         provider = self.config.ai_provider.lower()
         description = self._build_post_description(post_with_context)
         image_urls = self._get_image_urls(post_with_context)
@@ -556,13 +605,54 @@ class AINoteGenerator:
                 raw = self._chat_completion(payload)
         except Exception as ex:
             logger.warning("Self-evaluation failed: %s", ex)
-            return (True, "")
+            return ("pass", "")
 
         logger.info("Self-evaluation response: %s", raw)
-        upper = raw.upper().strip()
-        if upper.startswith("PASS"):
-            return (True, "")
-        return (False, raw.strip())
+        return self._parse_eval_result(raw)
+
+    def _rewrite_note(
+        self,
+        post_with_context: PostWithContext,
+        original_note: str,
+        feedback: str,
+        search_results: str,
+    ) -> str | None:
+        provider = self.config.ai_provider.lower()
+        description = self._build_post_description(post_with_context)
+        prompt = self._get_prompt_for_note_rewrite(description, original_note, feedback, search_results)
+
+        try:
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(
+                    prompt=prompt,
+                    system_prompt="あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。",
+                )
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.3,
+                    "messages": [
+                        {"role": "system", "content": "あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Note rewrite failed: %s", ex)
+            return None
+
+        logger.info("Rewritten note:\n%s", raw)
+
+        if NO_NOTE_NEEDED in raw.upper():
+            return None
+        if NOT_ENOUGH_EVIDENCE in raw.upper():
+            return None
+        if not self._extract_urls(raw):
+            return None
+        if "#" in raw:
+            return None
+
+        return raw.strip()
 
     # ── Main entry point ──
 
@@ -627,10 +717,26 @@ class AINoteGenerator:
 
         note_text = raw.strip()
 
-        passed, eval_reason = self._self_evaluate_note(post_with_context, note_text)
-        if not passed:
-            logger.info("Self-evaluation failed: %s", eval_reason)
-            return NoteGenerationResult(draft=None, reason=f"self_eval_failed: {eval_reason}")
+        # ── Self-evaluation with 1 retry ──
+        verdict, detail = self._self_evaluate_note(post_with_context, note_text)
+
+        if verdict == "improve":
+            logger.info("Self-evaluation requested improvement: %s", detail)
+            rewritten = self._rewrite_note(post_with_context, note_text, detail, search_results)
+            if rewritten is None:
+                draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+                return NoteGenerationResult(draft=draft, reason="rewrite_gave_up")
+
+            note_text = rewritten
+            verdict, detail = self._self_evaluate_note(post_with_context, note_text)
+
+            if verdict == "fail":
+                draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+                return NoteGenerationResult(draft=draft, reason=f"self_eval_failed_after_rewrite: {detail}")
+
+        elif verdict == "fail":
+            draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+            return NoteGenerationResult(draft=draft, reason=f"self_eval_failed: {detail}")
 
         draft = AINoteDraft(
             note_text=note_text,

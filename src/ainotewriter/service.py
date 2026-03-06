@@ -150,13 +150,18 @@ class CommunityNoteWriterService:
                 _progress("Generating note draft...")
                 gen_result = self.ai.generate_note(pwc)
                 draft = gen_result.draft
-                if draft is None:
-                    _progress(f"Skipped: {gen_result.reason}")
+                reason = gen_result.reason
+
+                is_self_eval_skip = reason.startswith("self_eval_failed") or reason == "rewrite_gave_up"
+
+                if draft is None or is_self_eval_skip:
+                    _progress(f"Skipped: {reason}")
                     results.append(
                         NoteProcessResult(
                             post_id=pwc.post.post_id,
                             status="skipped",
-                            reason=gen_result.reason,
+                            reason=reason,
+                            generated_note=draft.note_text if draft else None,
                         )
                     )
                     continue
