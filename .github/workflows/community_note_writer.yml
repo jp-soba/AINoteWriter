@@ -34,7 +34,7 @@ on:
         required: false
         default: "5"
   schedule:
-    - cron: "*/16 * * * *"
+    - cron: "*/30 * * * *"
 
 jobs:
   run-note-writer:
