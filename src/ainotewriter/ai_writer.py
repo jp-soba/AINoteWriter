@@ -353,7 +353,7 @@ class AINoteGenerator:
             logger.warning("Live search failed: %s", ex)
             return ""
 
-def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
+    def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
         provider = self.config.ai_provider.lower()
         if provider in {"none", "off", "disabled"}:
             return NoteGenerationResult(draft=None, reason="disabled")
