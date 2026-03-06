@@ -17,6 +17,27 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+PROCESSED_POSTS_PATH = Path("outputs/processed_posts.json")
+
+
+def _load_processed_posts() -> set[str]:
+    if not PROCESSED_POSTS_PATH.exists():
+        return set()
+    try:
+        data = json.loads(PROCESSED_POSTS_PATH.read_text(encoding="utf-8"))
+        return set(data.get("processed_post_ids", []))
+    except Exception as ex:
+        logger.warning("Failed to load processed posts cache: %s", ex)
+        return set()
+
+
+def _save_processed_posts(post_ids: set[str]) -> None:
+    PROCESSED_POSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {"processed_post_ids": sorted(post_ids)}
+    PROCESSED_POSTS_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
 
 def _send_discord_notification(
     webhook_url: str,
@@ -112,6 +133,10 @@ class CommunityNoteWriterService:
 
         started_at = datetime.utcnow().isoformat() + "Z"
         _progress("Run started")
+
+        cached_post_ids = _load_processed_posts()
+        _progress(f"Loaded {len(cached_post_ids)} previously processed posts from cache")
+
         _progress("Fetching posts eligible for notes...")
         posts = self.x_client.get_posts_eligible_for_notes(
             max_results=num_posts,
@@ -131,16 +156,27 @@ class CommunityNoteWriterService:
         _progress(f"Found {len(already_noted_post_ids)} posts already noted")
 
         results: list[NoteProcessResult] = []
-        processed_post_ids: set[str] = set()
+        processed_this_run: set[str] = set()
         for idx, pwc in enumerate(posts, start=1):
             try:
                 _progress(f"[{idx}/{len(posts)}] Processing post_id={pwc.post.post_id}")
                 _progress(f"Original post: {pwc.post.text}")
 
-                if pwc.post.post_id in processed_post_ids:
+                if pwc.post.post_id in processed_this_run:
                     _progress("Skipped: duplicate in current run")
                     continue
-                processed_post_ids.add(pwc.post.post_id)
+                processed_this_run.add(pwc.post.post_id)
+
+                if pwc.post.post_id in cached_post_ids:
+                    _progress("Skipped: already processed in a previous run")
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason="already_processed_cached",
+                        )
+                    )
+                    continue
 
                 if pwc.post.post_id in already_noted_post_ids:
                     _progress("Skipped: note already submitted for this post")
@@ -151,12 +187,15 @@ class CommunityNoteWriterService:
                             reason="Already submitted note for this post",
                         )
                     )
+                    cached_post_ids.add(pwc.post.post_id)
                     continue
 
                 _progress("Generating note draft...")
                 gen_result = self.ai.generate_note(pwc)
                 draft = gen_result.draft
                 reason = gen_result.reason
+
+                cached_post_ids.add(pwc.post.post_id)
 
                 is_self_eval_skip = reason.startswith("self_eval_failed") or reason == "rewrite_gave_up"
 
@@ -289,6 +328,9 @@ class CommunityNoteWriterService:
                         reason=str(ex),
                     )
                 )
+
+        _save_processed_posts(cached_post_ids)
+        _progress(f"Saved {len(cached_post_ids)} processed posts to cache")
 
         finished_at = datetime.utcnow().isoformat() + "Z"
         _progress("Run finished")

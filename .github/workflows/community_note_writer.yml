@@ -53,13 +53,19 @@ jobs:
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Restore processed posts cache
+        uses: actions/cache@v4
+        with:
+          path: outputs/processed_posts.json
+          key: processed-posts-${{ github.run_id }}
+          restore-keys: processed-posts-
+
       - name: Run writer
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
           AI_PROVIDER: claude_agent
           AI_TIMEOUT_SEC: "300"
           AI_MODEL: ${{ vars.AI_MODEL }}
@@ -67,7 +73,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           ai-note-writer run \
-            --num-posts "${{ github.event.inputs.num_posts || '2' }}" \
+            --num-posts "${{ github.event.inputs.num_posts || '5' }}" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
             --submit-notes=${{ github.event.inputs.submit_notes || 'false' }} \
             --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
