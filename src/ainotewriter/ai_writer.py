@@ -667,48 +667,51 @@ class AINoteGenerator:
         return self._parse_eval_result(raw)
 
     def _rewrite_note(
-        self,
-        post_with_context: PostWithContext,
-        original_note: str,
-        feedback: str,
-        search_results: str,
-    ) -> str | None:
-        provider = self.config.ai_provider.lower()
-        description = self._build_post_description(post_with_context)
-        prompt = self._get_prompt_for_note_rewrite(description, original_note, feedback, search_results)
+            self,
+            post_with_context: PostWithContext,
+            original_note: str,
+            feedback: str,
+            search_results: str,
+        ) -> str | None:
+            provider = self.config.ai_provider.lower()
+            description = self._build_post_description(post_with_context)
+            image_urls = self._get_image_urls(post_with_context)
+            prompt = self._get_prompt_for_note_rewrite(description, original_note, feedback, search_results)
 
-        try:
-            if provider in {"claude", "claude_agent", "claude-agent"}:
-                raw = self._claude_completion(
-                    prompt=prompt,
-                    system_prompt="あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。",
-                )
-            else:
-                payload: dict[str, Any] = {
-                    "model": self.config.ai_model,
-                    "temperature": 0.3,
-                    "messages": [
-                        {"role": "system", "content": "あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                }
-                raw = self._chat_completion(payload)
-        except Exception as ex:
-            logger.warning("Note rewrite failed: %s", ex)
-            return None
+            try:
+                if provider in {"claude", "claude_agent", "claude-agent"}:
+                    raw = self._claude_completion(
+                        prompt=prompt,
+                        system_prompt="あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。",
+                        allow_web_tools=True,
+                        images=image_urls or None,
+                    )
+                else:
+                    payload: dict[str, Any] = {
+                        "model": self.config.ai_model,
+                        "temperature": 0.3,
+                        "messages": [
+                            {"role": "system", "content": "あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                    }
+                    raw = self._chat_completion(payload)
+            except Exception as ex:
+                logger.warning("Note rewrite failed: %s", ex)
+                return None
 
-        logger.info("Rewritten note:\n%s", raw)
+            logger.info("Rewritten note:\n%s", raw)
 
-        if NO_NOTE_NEEDED in raw.upper():
-            return None
-        if NOT_ENOUGH_EVIDENCE in raw.upper():
-            return None
-        if not self._extract_urls(raw):
-            return None
-        if "#" in raw:
-            return None
+            if NO_NOTE_NEEDED in raw.upper():
+                return None
+            if NOT_ENOUGH_EVIDENCE in raw.upper():
+                return None
+            if not self._extract_urls(raw):
+                return None
+            if "#" in raw:
+                return None
 
-        return raw.strip()
+            return raw.strip()
 
     # ── Main entry point ──
 
