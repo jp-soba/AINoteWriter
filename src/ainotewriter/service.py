@@ -131,10 +131,16 @@ class CommunityNoteWriterService:
         _progress(f"Found {len(already_noted_post_ids)} posts already noted")
 
         results: list[NoteProcessResult] = []
+        processed_post_ids: set[str] = set()
         for idx, pwc in enumerate(posts, start=1):
             try:
                 _progress(f"[{idx}/{len(posts)}] Processing post_id={pwc.post.post_id}")
                 _progress(f"Original post: {pwc.post.text}")
+
+                if pwc.post.post_id in processed_post_ids:
+                    _progress("Skipped: duplicate in current run")
+                    continue
+                processed_post_ids.add(pwc.post.post_id)
 
                 if pwc.post.post_id in already_noted_post_ids:
                     _progress("Skipped: note already submitted for this post")

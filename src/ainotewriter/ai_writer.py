@@ -198,18 +198,50 @@ class AINoteGenerator:
         return merged
 
     def _parse_stream_json_output(self, raw_output: str) -> str:
-        texts: list[str] = []
+        """Extract only the final assistant message from stream-json output.
+        
+        Intermediate outputs (tool calls, tool results, agent thinking)
+        are filtered out since they are already reflected in the final summary.
+        """
+        last_assistant_text: str = ""
+
         for line in raw_output.split("\n"):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-                texts.extend(self._extract_text_recursive(obj))
             except json.JSONDecodeError:
-                pass
-        merged = "\n".join(t for t in texts if t).strip()
-        return merged if merged else raw_output.strip()
+                continue
+
+            obj_type = obj.get("type", "")
+
+            # Final result object
+            if obj_type == "result":
+                texts = self._extract_text_recursive(obj.get("result", {}))
+                merged = "\n".join(t for t in texts if t).strip()
+                if merged:
+                    return merged
+
+            # Assistant message - keep overwriting so we end up with the last one
+            if obj_type == "assistant":
+                message = obj.get("message", {})
+                content = message.get("content", [])
+                texts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t = block.get("text", "").strip()
+                        if t:
+                            texts.append(t)
+                merged = "\n".join(texts).strip()
+                if merged:
+                    last_assistant_text = merged
+
+        if last_assistant_text:
+            return last_assistant_text
+
+        # Fallback: return raw output if parsing failed
+        return raw_output.strip()
 
     def _run_claude_cli_with_images(
         self, prompt: str, system_prompt: str, images: list[str], *, allow_web_tools: bool = False
