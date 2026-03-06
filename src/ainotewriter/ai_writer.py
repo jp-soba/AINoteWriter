@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -37,11 +38,21 @@ class AINoteGenerator:
     def __init__(self, config: AppConfig):
         self.config = config
 
+    # ── Post description / media helpers ──
+
     @staticmethod
     def _build_post_description(post_with_context: PostWithContext) -> str:
         lines: list[str] = []
         lines.append("[Target Post]")
         lines.append(post_with_context.post.text)
+
+        if post_with_context.post.media:
+            photo_count = sum(1 for m in post_with_context.post.media if m.media_type == "photo")
+            video_count = sum(1 for m in post_with_context.post.media if m.media_type != "photo")
+            if photo_count:
+                lines.append(f"(この投稿には{photo_count}枚の画像が添付されています)")
+            if video_count:
+                lines.append("(この投稿には動画が含まれていますが、内容は確認できません)")
 
         if post_with_context.post.suggested_source_links:
             lines.append("\n[Suggested source links from requests]")
@@ -58,8 +69,33 @@ class AINoteGenerator:
         return "\n".join(lines)
 
     @staticmethod
+    def _get_image_urls(post_with_context: PostWithContext) -> list[str]:
+        urls: list[str] = []
+        for post in [post_with_context.post, post_with_context.quoted_post, post_with_context.in_reply_to_post]:
+            if post is None:
+                continue
+            for media in post.media:
+                if media.media_type == "photo":
+                    url = media.url or media.preview_image_url
+                    if url:
+                        urls.append(url)
+        return urls
+
+    @staticmethod
+    def _has_video(post_with_context: PostWithContext) -> bool:
+        for post in [post_with_context.post, post_with_context.quoted_post, post_with_context.in_reply_to_post]:
+            if post is None:
+                continue
+            for media in post.media:
+                if media.media_type not in ("photo",):
+                    return True
+        return False
+
+    @staticmethod
     def _extract_urls(text: str) -> list[str]:
         return re.findall(r"https?://[^\s)]+", text)
+
+    # ── LLM call helpers ──
 
     def _chat_completion(self, payload: dict[str, Any]) -> str:
         if not self.config.ai_api_key:
@@ -161,9 +197,66 @@ class AINoteGenerator:
             raise RuntimeError("Claude Agent SDK returned empty response")
         return merged
 
-    def _run_claude_cli_prompt(
-        self, prompt: str, system_prompt: str, *, allow_web_tools: bool = False
+    def _parse_stream_json_output(self, raw_output: str) -> str:
+        texts: list[str] = []
+        for line in raw_output.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                texts.extend(self._extract_text_recursive(obj))
+            except json.JSONDecodeError:
+                pass
+        merged = "\n".join(t for t in texts if t).strip()
+        return merged if merged else raw_output.strip()
+
+    def _run_claude_cli_with_images(
+        self, prompt: str, system_prompt: str, images: list[str], *, allow_web_tools: bool = False
     ) -> str:
+        content_blocks: list[dict[str, Any]] = []
+        for url in images:
+            content_blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+        full_text = f"{system_prompt}\n\n{prompt}".strip()
+        content_blocks.append({"type": "text", "text": full_text})
+
+        stream_input = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": content_blocks}},
+            ensure_ascii=False,
+        )
+
+        cmd = [
+            self.config.claude_cli_path, "--print",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+        ]
+        if allow_web_tools:
+            cmd += ["--allowedTools", "WebSearch,WebFetch"]
+
+        proc = subprocess.run(
+            cmd, input=stream_input, capture_output=True, text=True,
+            timeout=self.config.ai_timeout_sec, check=False,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.strip() if proc.stderr else ""
+            raise RuntimeError(
+                f"Claude CLI request failed (exit={proc.returncode}): {stderr or 'unknown error'}"
+            )
+
+        raw = (proc.stdout or "").strip()
+        if not raw:
+            raise RuntimeError("Claude CLI returned empty response")
+        return self._parse_stream_json_output(raw)
+
+    def _run_claude_cli_prompt(
+        self, prompt: str, system_prompt: str, *, allow_web_tools: bool = False, images: list[str] | None = None
+    ) -> str:
+        if images:
+            return self._run_claude_cli_with_images(
+                prompt, system_prompt, images, allow_web_tools=allow_web_tools
+            )
+
         full_prompt = f"{system_prompt}\n\n{prompt}".strip()
         cmd = [self.config.claude_cli_path, "--print"]
         if allow_web_tools:
@@ -187,8 +280,14 @@ class AINoteGenerator:
         return text
 
     def _claude_completion(
-        self, prompt: str, system_prompt: str, *, allow_web_tools: bool = False
+        self, prompt: str, system_prompt: str, *,
+        allow_web_tools: bool = False, images: list[str] | None = None
     ) -> str:
+        if images:
+            return self._run_claude_cli_prompt(
+                prompt, system_prompt, allow_web_tools=allow_web_tools, images=images
+            )
+
         sdk_error: Exception | None = None
         try:
             return asyncio.run(self._run_claude_sdk_query_async(prompt, system_prompt))
@@ -228,6 +327,27 @@ class AINoteGenerator:
                         return str(text).strip()
         raise RuntimeError("AI API response did not contain output text")
 
+    # ── Prompts ──
+
+    def _get_prompt_for_pre_filter(self, post_with_context_description: str) -> str:
+        return f"""この投稿にファクトチェック可能な具体的な事実主張が含まれているかを判定してください。
+
+以下に該当する場合は「NO」とだけ答えてください:
+- 個人の意見・感想・感情表現のみの投稿
+- 風刺・皮肉・ユーモア
+- 一次情報の共有（当事者またはその代理人が自身の体験や調査結果を報告している）
+- 未来の予測のみ
+- 他者への罵倒・誹謗中傷のみ
+- 公式発表や報道の単なる引用・共有（引用内容自体に誤りがない場合）
+
+検証可能な具体的な事実主張（数値、日付、出来事、人物の行動、因果関係など）が含まれており、
+かつその主張が誤解を招く可能性がある場合は「YES」と答えてください。
+
+「YES」か「NO」のみで回答してください。
+
+投稿:
+{post_with_context_description}""".strip()
+
     def _get_prompt_for_live_search(self, post_with_context_description: str) -> str:
         return f"""以下は X の投稿です。投稿内の主張が誤解を招く可能性があるかを、公開情報で調査してください。
 
@@ -256,7 +376,7 @@ class AINoteGenerator:
 - URLを除いた本文は 280 文字以内を目安に簡潔に記述すること
 - 体言止めなどの不自然な省略表現は避ける
 - 文体は丁寧語で統一すること
-- ノートは短い方が好まれる傾向にある。ただし、重要な情報は省略しないこと。
+- ノートは短い方が好まれる傾向にある。ただし、重要な情報は省略しないこと
 - 少なくとも1つのURLを本文に含める
 - URLはそのまま記載（[Source]やカッコで囲む等の装飾禁止）。URL以外のテキストとは、改行等で区切ること
 - ハッシュタグ、絵文字、煽り表現は禁止
@@ -267,6 +387,11 @@ class AINoteGenerator:
 - 迷う場合は書かない（NO NOTE NEEDED か NOT ENOUGH EVIDENCE を返す）
 - 未来予測や主観のみの投稿には原則ノートを書かない
 - 信頼性の高い一次情報・公的情報を優先する
+- ポストの主張を否定または訂正する具体的な根拠がある場合のみノートを書く
+- ポストの主張を単に裏付ける・確認するだけのノートは書かない
+- 「～は確認できません」「～の根拠は見つかりません」「～は公開情報から確認できていません」のような、自分の検索範囲の限界に基づく記述は絶対に禁止
+- 当事者が自身の体験や調査結果を共有している投稿に対して、公開情報で裏付けが取れないことを理由に疑義を呈してはならない
+- 「見つけられなかった」ことは「存在しない」ことの根拠にはならない
 
 投稿コンテキスト:
 {post_with_context_description}
@@ -277,7 +402,65 @@ class AINoteGenerator:
 ```
 """.strip()
 
-    def _run_live_search(self, post_with_context_description: str) -> str:
+    def _get_prompt_for_self_evaluation(
+        self,
+        post_with_context_description: str,
+        note_text: str,
+    ) -> str:
+        return f"""あなたはCommunity Notesの品質評価者です。以下のX投稿と、それに対するノート案を評価してください。
+調査結果や背景情報は提供しません。ノートの内容だけで判断してください。
+
+評価基準:
+1. ノートはポストの主張に対して新しい文脈や訂正を追加していますか？ポストの内容を単に確認・裏付けしているだけのノートは不合格です。
+2. このノートは、投稿に賛成する人にも反対する人にも等しく有用ですか？一方の政治的立場だけが喜ぶ内容になっていませんか？
+3. ノートに意見・推測・主観的な判断は含まれていませんか？
+4. ノートに「～は確認できません」「～の根拠は見つかりません」「～は公開情報から確認できていません」のような、検索範囲の限界に基づく疑義が含まれていませんか？
+5. ノートの情報は、ポストを見た一般の読者にとって有益な文脈を提供していますか？
+
+すべての基準を満たす場合は「PASS」のみを返してください。
+いずれかの基準を満たさない場合は「FAIL: 理由」を返してください。
+
+[投稿]
+{post_with_context_description}
+
+[ノート案]
+{note_text}""".strip()
+
+    # ── Phase methods ──
+
+    def _pre_filter_post(self, post_with_context: PostWithContext) -> bool:
+        provider = self.config.ai_provider.lower()
+        description = self._build_post_description(post_with_context)
+        image_urls = self._get_image_urls(post_with_context)
+        prompt = self._get_prompt_for_pre_filter(description)
+
+        try:
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(
+                    prompt=prompt,
+                    system_prompt="あなたは投稿の分類器です。指示に従い、YESかNOのみで回答してください。",
+                    images=image_urls or None,
+                )
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.1,
+                    "messages": [
+                        {"role": "system", "content": "あなたは投稿の分類器です。指示に従い、YESかNOのみで回答してください。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Pre-filter failed: %s", ex)
+            return True
+
+        logger.info("Pre-filter response: %s", raw)
+        return "YES" in raw.upper()
+
+    def _run_live_search(
+        self, post_with_context_description: str, image_urls: list[str] | None = None
+    ) -> str:
         user_prompt = self._get_prompt_for_live_search(post_with_context_description)
         provider = self.config.ai_provider.lower()
 
@@ -287,6 +470,7 @@ class AINoteGenerator:
                     prompt=user_prompt,
                     system_prompt="あなたは慎重な調査アシスタントです。公開情報のみを使い、根拠URLを明示してください。",
                     allow_web_tools=True,
+                    images=image_urls or None,
                 )
             except Exception as ex:
                 logger.warning("Live search failed (claude): %s", ex)
@@ -306,11 +490,7 @@ class AINoteGenerator:
                         "content": user_prompt,
                     },
                 ],
-                "tools": [
-                    {
-                        "type": "web_search",
-                    }
-                ],
+                "tools": [{"type": "web_search"}],
                 "tool_choice": "auto",
             }
             try:
@@ -320,11 +500,7 @@ class AINoteGenerator:
                 responses_payload: dict[str, Any] = {
                     "model": self.config.ai_model,
                     "input": user_prompt,
-                    "tools": [
-                        {
-                            "type": "web_search",
-                        }
-                    ],
+                    "tools": [{"type": "web_search"}],
                     "tool_choice": "auto",
                 }
                 try:
@@ -353,13 +529,58 @@ class AINoteGenerator:
             logger.warning("Live search failed: %s", ex)
             return ""
 
+    def _self_evaluate_note(
+        self, post_with_context: PostWithContext, note_text: str
+    ) -> tuple[bool, str]:
+        provider = self.config.ai_provider.lower()
+        description = self._build_post_description(post_with_context)
+        image_urls = self._get_image_urls(post_with_context)
+        prompt = self._get_prompt_for_self_evaluation(description, note_text)
+
+        try:
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(
+                    prompt=prompt,
+                    system_prompt="あなたはCommunity Notesの品質評価者です。厳格に評価してください。",
+                    images=image_urls or None,
+                )
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.1,
+                    "messages": [
+                        {"role": "system", "content": "あなたはCommunity Notesの品質評価者です。厳格に評価してください。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Self-evaluation failed: %s", ex)
+            return (True, "")
+
+        logger.info("Self-evaluation response: %s", raw)
+        upper = raw.upper().strip()
+        if upper.startswith("PASS"):
+            return (True, "")
+        return (False, raw.strip())
+
+    # ── Main entry point ──
+
     def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
         provider = self.config.ai_provider.lower()
         if provider in {"none", "off", "disabled"}:
             return NoteGenerationResult(draft=None, reason="disabled")
 
+        if self._has_video(post_with_context):
+            return NoteGenerationResult(draft=None, reason="has_video")
+
+        if not self._pre_filter_post(post_with_context):
+            return NoteGenerationResult(draft=None, reason="no_factual_claims")
+
         description = self._build_post_description(post_with_context)
-        search_results = self._run_live_search(description)
+        image_urls = self._get_image_urls(post_with_context)
+
+        search_results = self._run_live_search(description, image_urls=image_urls)
         logger.info("Live search results:\n%s", search_results if search_results else "(empty)")
 
         note_prompt = self._get_prompt_for_note_writing(description, search_results)
@@ -405,6 +626,12 @@ class AINoteGenerator:
             return NoteGenerationResult(draft=None, reason="hashtag")
 
         note_text = raw.strip()
+
+        passed, eval_reason = self._self_evaluate_note(post_with_context, note_text)
+        if not passed:
+            logger.info("Self-evaluation failed: %s", eval_reason)
+            return NoteGenerationResult(draft=None, reason=f"self_eval_failed: {eval_reason}")
+
         draft = AINoteDraft(
             note_text=note_text,
             misleading_tags=["missing_important_context"],
