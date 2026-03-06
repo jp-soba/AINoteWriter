@@ -353,13 +353,15 @@ class AINoteGenerator:
             logger.warning("Live search failed: %s", ex)
             return ""
 
-    def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
+def generate_note(self, post_with_context: PostWithContext) -> NoteGenerationResult:
         provider = self.config.ai_provider.lower()
         if provider in {"none", "off", "disabled"}:
             return NoteGenerationResult(draft=None, reason="disabled")
 
         description = self._build_post_description(post_with_context)
         search_results = self._run_live_search(description)
+        logger.info("Live search results:\n%s", search_results if search_results else "(empty)")
+
         note_prompt = self._get_prompt_for_note_writing(description, search_results)
 
         try:
@@ -387,6 +389,8 @@ class AINoteGenerator:
         except Exception as ex:
             logger.warning("Note generation failed: %s", ex)
             return NoteGenerationResult(draft=None, reason=f"ai_error ({ex})")
+
+        logger.info("AI raw response:\n%s", raw)
 
         upper = raw.upper()
         if NO_NOTE_NEEDED in upper:

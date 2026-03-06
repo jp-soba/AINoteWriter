@@ -113,11 +113,13 @@ class CommunityNoteWriterService:
                         post_id=pwc.post.post_id,
                         note_text=draft.note_text,
                     )
+                    logger.info("Evaluation response: %s", evaluation)
                     score = (
                         evaluation.get("data", {}).get("claim_opinion_score")
                         if isinstance(evaluation, dict)
                         else None
                     )
+                    _progress(f"claim_opinion_score={score}")
                     if score is not None and score < min_claim_opinion_score:
                         _progress(f"Skipped: claim_opinion_score too low ({score})")
                         results.append(
@@ -154,6 +156,8 @@ class CommunityNoteWriterService:
                             if urls:
                                 ok, bad_urls = self._check_urls(urls, url_check_timeout_sec)
 
+                        _progress(f"URL check: ok={ok}, bad={bad_urls}")
+
                         if not ok:
                             _progress(f"Skipped: invalid URLs: {', '.join(bad_urls)}")
                             results.append(
@@ -185,7 +189,7 @@ class CommunityNoteWriterService:
                         )
                     )
                 else:
-                    _progress("Draft created (submit_notes=False)")
+                    _progress(f"Draft created (submit_notes=False):\n{draft.note_text}")
                     results.append(
                         NoteProcessResult(
                             post_id=pwc.post.post_id,
