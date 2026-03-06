@@ -39,7 +39,7 @@ class AppConfig:
     default_test_mode: bool = True
     default_submit_notes: bool = False
     default_evaluate_before_submit: bool = True
-    default_min_claim_opinion_score: float = -0.1
+    default_min_claim_opinion_score: float = -1
     default_enable_url_check: bool = False
     url_check_timeout_sec: int = 5
 
@@ -70,7 +70,7 @@ class AppConfig:
                 os.getenv("DEFAULT_EVALUATE_BEFORE_SUBMIT"), True
             ),
             default_min_claim_opinion_score=float(
-                os.getenv("DEFAULT_MIN_CLAIM_OPINION_SCORE", "-0.1")
+                os.getenv("DEFAULT_MIN_CLAIM_OPINION_SCORE", "-1")
             ),
             default_enable_url_check=_as_bool(os.getenv("DEFAULT_ENABLE_URL_CHECK"), False),
             url_check_timeout_sec=int(os.getenv("URL_CHECK_TIMEOUT_SEC", "5")),
