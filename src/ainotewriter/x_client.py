@@ -118,14 +118,8 @@ class XCommunityNotesClient:
         return out
 
     def evaluate_note(self, post_id: str, note_text: str) -> dict[str, Any]:
-        if not self.config.x_bearer_token:
-            raise RuntimeError("X_BEARER_TOKEN is required for evaluate_note")
         body = {"post_id": post_id, "note_text": note_text}
-        headers = {
-            "Authorization": f"Bearer {self.config.x_bearer_token}",
-            "Content-Type": "application/json",
-        }
-        resp = requests.post(self._url("evaluate_note"), json=body, headers=headers, timeout=30)
+        resp = requests.post(self._url("evaluate_note"), json=body, auth=self.auth, timeout=30)
         self._raise_for_error(resp)
         return resp.json()
 

@@ -67,7 +67,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           ai-note-writer run \
-            --num-posts "${{ github.event.inputs.num_posts || '5' }}" \
+            --num-posts "${{ github.event.inputs.num_posts || '2' }}" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
             --submit-notes=${{ github.event.inputs.submit_notes || 'false' }} \
             --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
