@@ -53,7 +53,7 @@ def _send_discord_notification(
             {
                 "title": "評価結果",
                 "description": "\n".join(lines)[:4096],
-                "color": 0x2ECC71 if score is not None and score < 0.55 else 0xE74C3C,
+                "color": 0x2ECC71 if score is not None and score > -1 else 0xE74C3C,
             }
         )
 
