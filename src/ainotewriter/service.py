@@ -118,6 +118,8 @@ class CommunityNoteWriterService:
         progress_callback: Callable[[str], None] | None = None,
         feed_lang: str = "ja",
     ) -> RunSummary:
+        self.ai = AINoteGenerator(self.config, feed_lang=feed_lang)
+
         def _progress(message: str) -> None:
             if progress_callback is not None:
                 progress_callback(message)

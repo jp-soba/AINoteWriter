@@ -22,5 +22,8 @@ ai-note-writer-gui = "ainotewriter.gui:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+ainotewriter = ["*.json"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

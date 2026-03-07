@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -17,6 +18,15 @@ from .config import AppConfig
 from .models import PostWithContext
 
 logger = logging.getLogger(__name__)
+
+
+def _load_prompts() -> dict:
+    path = Path(__file__).parent / "prompts.json"
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+_PROMPTS: dict = _load_prompts()
 
 NO_NOTE_NEEDED = "NO NOTE NEEDED"
 NOT_ENOUGH_EVIDENCE = "NOT ENOUGH EVIDENCE TO WRITE A GOOD COMMUNITY NOTE"
@@ -36,13 +46,17 @@ class NoteGenerationResult:
 
 
 class AINoteGenerator:
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, feed_lang: str = "ja"):
         self.config = config
+        self.lang = "ja" if feed_lang == "ja" else "en"
+
+    def _p(self, category: str, key: str) -> str:
+        """Get a prompt string in the current language."""
+        return _PROMPTS[category][key][self.lang]
 
     # ── Post description / media helpers ──
 
-    @staticmethod
-    def _build_post_description(post_with_context: PostWithContext) -> str:
+    def _build_post_description(self, post_with_context: PostWithContext) -> str:
         lines: list[str] = []
         lines.append("[Target Post]")
         lines.append(post_with_context.post.text)
@@ -51,9 +65,9 @@ class AINoteGenerator:
             photo_count = sum(1 for m in post_with_context.post.media if m.media_type == "photo")
             video_count = sum(1 for m in post_with_context.post.media if m.media_type != "photo")
             if photo_count:
-                lines.append(f"(この投稿には{photo_count}枚の画像が添付されています)")
+                lines.append(self._p("ui_strings", "photo_attachment").format(count=photo_count))
             if video_count:
-                lines.append("(この投稿には動画が含まれていますが、内容は確認できません)")
+                lines.append(self._p("ui_strings", "video_attachment"))
 
         if post_with_context.post.suggested_source_links:
             lines.append("\n[Suggested source links from requests]")
@@ -363,118 +377,41 @@ class AINoteGenerator:
     # ── Prompts ──
 
     def _get_prompt_for_pre_filter(self, post_with_context_description: str) -> str:
-        return f"""この投稿にファクトチェック可能な具体的な事実主張が含まれているかを判定してください。
-
-検証可能な具体的な事実主張（数値、日付、出来事、人物の行動、因果関係など）が含まれており、
-かつその主張が誤解を招く/誤りである可能性が少しでもある場合は「YES」と答えてください。
-そうでない場合は、「NO」と答えてください。
-
-以下に該当する場合は「検証可能な具体的な事実主張」とはみなされません:
-- 個人の意見・感想・感情表現
-- 風刺・皮肉・ユーモア
-- 一次情報の共有（当事者またはその代理人が自身の体験や調査結果を報告している）
-- 未来の予測
-- 他者への罵倒・誹謗中傷
-
-注意: 投稿全体のトーンが感情的・論争的であっても、その中に検証可能な具体的事実主張が1つでも含まれていれば「YES」と判定してください。
-トーンではなく内容で判断すること。
-
-「YES」か「NO」のみで回答してください。
-
-投稿:
-{post_with_context_description}""".strip()
+        return self._p("prompts", "pre_filter").format(
+            post_description=post_with_context_description,
+        ).strip()
 
     def _get_prompt_for_live_search(self, post_with_context_description: str) -> str:
-        return f"""以下は X の投稿です。投稿内の主張が誤解を招く可能性があるかを、公開情報で調査してください。
+        return self._p("prompts", "live_search").format(
+            post_description=post_with_context_description,
+        ).strip()
 
-    要件:
-    - 事実主張ごとに根拠URLを併記する
-    - URLは本文にそのまま書く（「出典:」などの飾りは不要）
-    - 不確かな情報は推測せず、確認できる情報のみ示す
-    - 故人に対する未確認の噂や性的内容に関する主張は調査対象外とし、検索しないこと
-    - 裁判で認定された事実や公式報告のみを対象とすること
-
-    調査対象:
-    {post_with_context_description}
-    """.strip()
-
-    def _get_note_text_rules(self) -> str:
-        return """ノート本文ルール:
-- URLを除いた本文は 280 文字以内を目安に簡潔に記述すること
-- 体言止めなどの不自然な省略表現は避ける
-- 文体は丁寧語で統一すること
-- ノートは短い方が好まれる傾向にある。ただし、重要な情報は省略しないこと
-- 論点ごとに少なくとも1つのURLを本文に含める。異なる2つの情報源があると尚良い。ノートに言及すべき論点が2つ以上ある場合は、段落で分ける。論点は3つ以内にする。
-- URLはそのまま記載（[Source]やカッコで囲む, URLの直前や直後にURL以外のテキストを入れる等の装飾禁止）。URL以外のテキストとは、改行で区切ること
-- 論点が2つ、URLが3つある場合の構成例：[論点1の説明][改行][論点1のURL1][改行][改行][論点2の説明][改行][論点2のURL1][改行][論点2のURL2]
-- ノートに含まれるすべての事実主張が、ノート内のいずれかの URL で裏付けられていること。また、URLで裏付けられない事実主張はノートに含めない。
-- ハッシュタグ、絵文字、煽り表現は禁止
-- 意見ではなく、検証可能な事実と文脈補足を中心に書く
-- 冒頭に「Community Note:」等の前置きは付けない"""
+    def _get_note_text_rules(self, for_writing: bool = False) -> str:
+        rules = self._p("prompts", "note_text_rules")
+        if for_writing and self.lang != "ja":
+            rules += "\n" + self._p("dynamic_rules", "write_in_post_language")
+        return rules
 
     def _get_prompt_for_note_writing(
         self,
         post_with_context_description: str,
         search_results: str,
     ) -> str:
-        return f"""あなたは Community Notes の下書きを作成します。以下の投稿情報と調査結果を使って判断してください。
-
-まず判定:
-1) ノート不要なら "NO NOTE NEEDED." のみを返す
-2) 必要性はあるが根拠不足なら "NOT ENOUGH EVIDENCE TO WRITE A GOOD COMMUNITY NOTE." のみを返す
-3) 根拠が十分な場合のみ、ノート本文のみを返す
-
-{self._get_note_text_rules()}
-
-判断方針:
-- 迷う場合は書かない（NO NOTE NEEDED か NOT ENOUGH EVIDENCE を返す）
-- 未来予測や主観のみの投稿には原則ノートを書かない
-- 信頼性の高い一次情報・公的情報を優先する
-- ポストの主張を否定または訂正する具体的な根拠がある場合のみノートを書く
-- ポストの主張を単に裏付ける・確認するだけのノートは書かない
-- 「～は確認できません」「～の根拠は見つかりません」「～は公開情報から確認できていません」のような、自分の検索範囲の限界に基づく記述は絶対に禁止
-- 投稿が既に適切な留保を含んでいる場合、その留保に追加情報を付け足すノートも不要
-- 当事者が自身の体験や調査結果を共有している投稿に対して、公開情報で裏付けが取れないことを理由に疑義を呈してはならない
-- 「見つけられなかった」ことは「存在しない」ことの根拠にはならない
-
-投稿コンテキスト:
-{post_with_context_description}
-
-調査メモ:
-```
-{search_results}
-```
-""".strip()
+        return self._p("prompts", "note_writing").format(
+            note_text_rules=self._get_note_text_rules(for_writing=True),
+            post_description=post_with_context_description,
+            search_results=search_results,
+        ).strip()
 
     def _get_prompt_for_self_evaluation(
         self,
         post_with_context_description: str,
         note_text: str,
     ) -> str:
-        return f"""あなたはCommunity Notesの品質評価者です。以下のX投稿と、それに対するノート案を評価してください。
-調査結果や背景情報は提供しません。ノートの内容だけで判断してください。
-ただし、ノートの正確性を検証するために、Web検索やURLの取得は積極的に行ってください。
-
-評価基準:
-1. ノートはポストの主張に対して新しい文脈や訂正を追加していますか？ポストの内容を単に確認・裏付けしているだけのノートは不合格です。
-2. このノートは、投稿に賛成する人にも反対する人にも等しく有用ですか？一方の政治的立場だけが喜ぶ内容になっていませんか？
-3. ノートに意見・推測・主観的な判断は含まれていませんか？
-4. ノートに「～は確認できません」「～の根拠は見つかりません」「～は公開情報から確認できていません」のような、検索範囲の限界に基づく疑義が含まれていませんか？
-5. ノートの情報は、ポストを見た一般の読者にとって有益な文脈を提供していますか？
-6. ノートに含まれるURLを実際に取得し、ノートの記述がソースの内容と一致しているか検証してください。ソースに書かれていない情報がノートに含まれている場合は不合格です。
-7. ノートに含まれるすべての事実主張が、ノート内のいずれかの URL で裏付けられている必要があります。URL に記載のない主張がノートに含まれている場合は IMPROVE とし、その主張の根拠 URL の追加を指示してください。
-8. ノートに含まれる事実主張を独自に検索し、正確かどうか検証してください。ノートに不正確な主張が含まれている場合は不合格です。
-
-判定:
-- すべての基準を満たす場合は「PASS」のみを返してください。
-- ノートの方向性は正しいが表現に改善の余地がある場合は「IMPROVE: 具体的な改善指示」を返してください。
-- 根本的にノートを書くべきでない場合（投稿を裏付けているだけ、一方的に党派的、等）のみ「FAIL: 理由」を返してください。
-
-[投稿]
-{post_with_context_description}
-
-[ノート案]
-{note_text}""".strip()
+        return self._p("prompts", "self_evaluation").format(
+            post_description=post_with_context_description,
+            note_text=note_text,
+        ).strip()
 
     def _get_prompt_for_note_rewrite(
         self,
@@ -483,29 +420,13 @@ class AINoteGenerator:
         feedback: str,
         search_results: str,
     ) -> str:
-        return f"""あなたはCommunity Notesの下書きを改善します。以下のフィードバックをもとに、ノートを書き直してください。
-
-書き直しルール:
-- フィードバックの指摘を反映する
-- ノート本文のみを返す（前置き不要。前のノートから変更した点を示す必要もなし。あなたの応答がそのままノートとして提出されます）
-- 改善できない場合は "NO NOTE NEEDED." と返す
-
-{self._get_note_text_rules()}
-
-[投稿]
-{post_with_context_description}
-
-[元のノート]
-{original_note}
-
-[フィードバック]
-{feedback}
-
-[調査メモ]
-```
-{search_results}
-```
-""".strip()
+        return self._p("prompts", "note_rewrite").format(
+            note_text_rules=self._get_note_text_rules(for_writing=True),
+            post_description=post_with_context_description,
+            original_note=original_note,
+            feedback=feedback,
+            search_results=search_results,
+        ).strip()
 
     # ── Phase methods ──
 
@@ -516,10 +437,11 @@ class AINoteGenerator:
         prompt = self._get_prompt_for_pre_filter(description)
 
         try:
+            sys_prompt = self._p("system_prompts", "pre_filter")
             if provider in {"claude", "claude_agent", "claude-agent"}:
                 raw = self._claude_completion(
                     prompt=prompt,
-                    system_prompt="あなたは投稿の分類器です。指示に従い、YESかNOのみで回答してください。",
+                    system_prompt=sys_prompt,
                     images=image_urls or None,
                 )
             else:
@@ -527,7 +449,7 @@ class AINoteGenerator:
                     "model": self.config.ai_model,
                     "temperature": 0.1,
                     "messages": [
-                        {"role": "system", "content": "あなたは投稿の分類器です。指示に従い、YESかNOのみで回答してください。"},
+                        {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": prompt},
                     ],
                 }
@@ -549,7 +471,7 @@ class AINoteGenerator:
             try:
                 return self._claude_completion(
                     prompt=user_prompt,
-                    system_prompt="あなたは慎重な調査アシスタントです。公開情報のみを使い、根拠URLを明示してください。",
+                    system_prompt=self._p("system_prompts", "live_search_claude"),
                     allow_web_tools=True,
                     images=image_urls or None,
                 )
@@ -557,6 +479,7 @@ class AINoteGenerator:
                 logger.warning("Live search failed (claude): %s", ex)
                 return ""
 
+        sys_prompt_other = self._p("system_prompts", "live_search_other")
         if provider == "xai":
             chat_payload: dict[str, Any] = {
                 "model": self.config.ai_model,
@@ -564,7 +487,7 @@ class AINoteGenerator:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "あなたは慎重な調査アシスタントです。未確認情報を断定しません。",
+                        "content": sys_prompt_other,
                     },
                     {
                         "role": "user",
@@ -596,7 +519,7 @@ class AINoteGenerator:
             "messages": [
                 {
                     "role": "system",
-                    "content": "あなたは慎重な調査アシスタントです。未確認情報を断定しません。",
+                    "content": sys_prompt_other,
                 },
                 {
                     "role": "user",
@@ -649,10 +572,11 @@ class AINoteGenerator:
         prompt = self._get_prompt_for_self_evaluation(description, note_text)
 
         try:
+            sys_prompt = self._p("system_prompts", "self_evaluation")
             if provider in {"claude", "claude_agent", "claude-agent"}:
                 raw = self._claude_completion(
                     prompt=prompt,
-                    system_prompt="あなたはCommunity Notesの品質評価者です。厳格に評価してください。",
+                    system_prompt=sys_prompt,
                     images=image_urls or None,
                     allow_web_tools=True,
                 )
@@ -661,7 +585,7 @@ class AINoteGenerator:
                     "model": self.config.ai_model,
                     "temperature": 0.1,
                     "messages": [
-                        {"role": "system", "content": "あなたはCommunity Notesの品質評価者です。厳格に評価してください。"},
+                        {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": prompt},
                     ],
                 }
@@ -686,10 +610,11 @@ class AINoteGenerator:
             prompt = self._get_prompt_for_note_rewrite(description, original_note, feedback, search_results)
 
             try:
+                sys_prompt = self._p("system_prompts", "note_rewrite")
                 if provider in {"claude", "claude_agent", "claude-agent"}:
                     raw = self._claude_completion(
                         prompt=prompt,
-                        system_prompt="あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。",
+                        system_prompt=sys_prompt,
                         allow_web_tools=True,
                         images=image_urls or None,
                     )
@@ -698,7 +623,7 @@ class AINoteGenerator:
                         "model": self.config.ai_model,
                         "temperature": 0.3,
                         "messages": [
-                            {"role": "system", "content": "あなたはCommunity Notes向けの事実確認ライターです。フィードバックを反映してノートを改善してください。"},
+                            {"role": "system", "content": sys_prompt},
                             {"role": "user", "content": prompt},
                         ],
                     }
@@ -745,7 +670,7 @@ class AINoteGenerator:
             if provider in {"claude", "claude_agent", "claude-agent"}:
                 raw = self._claude_completion(
                     prompt=note_prompt,
-                    system_prompt="あなたはCommunity Notes向けの事実確認ライターです。推測はせず、検証可能な事実のみを使ってください。",
+                    system_prompt=self._p("system_prompts", "note_writing"),
                     allow_web_tools=True,
                 )
             else:
@@ -755,7 +680,7 @@ class AINoteGenerator:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "あなたはCommunity Notes向けの事実確認ライターです。",
+                            "content": self._p("system_prompts", "note_writing_other"),
                         },
                         {
                             "role": "user",
