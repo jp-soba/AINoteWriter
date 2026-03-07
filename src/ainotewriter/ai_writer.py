@@ -214,7 +214,7 @@ class AINoteGenerator:
 
     def _parse_stream_json_output(self, raw_output: str) -> str:
         """Extract only the final assistant message from stream-json output.
-        
+
         Intermediate outputs (tool calls, tool results, agent thinking)
         are filtered out since they are already reflected in the final summary.
         """
@@ -231,14 +231,12 @@ class AINoteGenerator:
 
             obj_type = obj.get("type", "")
 
-            # Final result object
             if obj_type == "result":
                 texts = self._extract_text_recursive(obj.get("result", {}))
                 merged = "\n".join(t for t in texts if t).strip()
                 if merged:
                     return merged
 
-            # Assistant message - keep overwriting so we end up with the last one
             if obj_type == "assistant":
                 message = obj.get("message", {})
                 content = message.get("content", [])
@@ -255,7 +253,6 @@ class AINoteGenerator:
         if last_assistant_text:
             return last_assistant_text
 
-        # Fallback: return raw output if parsing failed
         return raw_output.strip()
 
     def _run_claude_cli_with_images(
@@ -416,17 +413,36 @@ class AINoteGenerator:
     def _get_prompt_for_note_rewrite(
         self,
         post_with_context_description: str,
-        original_note: str,
-        feedback: str,
+        rewrite_history: str,
         search_results: str,
     ) -> str:
         return self._p("prompts", "note_rewrite").format(
             note_text_rules=self._get_note_text_rules(for_writing=True),
             post_description=post_with_context_description,
-            original_note=original_note,
-            feedback=feedback,
+            rewrite_history=rewrite_history,
             search_results=search_results,
         ).strip()
+
+    def _build_rewrite_history_text(self, history: list[dict[str, str]]) -> str:
+        if not history:
+            return ""
+        parts: list[str] = []
+        header = "[リライト履歴]" if self.lang == "ja" else "[Rewrite History]"
+        parts.append(header)
+        for i, entry in enumerate(history, 1):
+            is_latest = i == len(history)
+            if self.lang == "ja":
+                label = f"--- Round {i} (最新・改善対象) ---" if is_latest else f"--- Round {i} ---"
+                parts.append(label)
+                parts.append(f"ノート:\n{entry['note']}")
+                parts.append(f"\nフィードバック:\n{entry['feedback']}")
+            else:
+                label = f"--- Round {i} (Latest. Target for improvement) ---" if is_latest else f"--- Round {i} ---"
+                parts.append(label)
+                parts.append(f"Note:\n{entry['note']}")
+                parts.append(f"\nFeedback:\n{entry['feedback']}")
+            parts.append("")
+        return "\n".join(parts)
 
     # ── Phase methods ──
 
@@ -539,7 +555,6 @@ class AINoteGenerator:
         """
         cleaned = raw.strip()
 
-        # "Verdict: PASS" / "**Verdict: FAIL**" / "**Verdict**: IMPROVE" etc.
         no_stars = cleaned.replace("*", "")
         verdict_match = re.search(
             r"Verdict\s*:\s*(PASS|IMPROVE|FAIL)",
@@ -554,7 +569,6 @@ class AINoteGenerator:
             detail = detail.lstrip(":").lstrip("*").strip()
             return (v.lower(), detail or cleaned)
 
-        # Line-by-line scan
         for line in cleaned.split("\n"):
             line = line.strip().strip("*").strip("-").strip()
             if not line:
@@ -570,7 +584,6 @@ class AINoteGenerator:
                 detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
                 return ("fail", detail)
 
-        # Fallback: keyword search (strict order to avoid false positives)
         upper_all = cleaned.upper()
         if "FAIL" in upper_all:
             return ("fail", cleaned)
@@ -582,8 +595,8 @@ class AINoteGenerator:
 
     def _self_evaluate_note(
         self, post_with_context: PostWithContext, note_text: str
-    ) -> tuple[str, str]:
-        """Returns (verdict, detail). verdict is "pass", "improve", or "fail"."""
+    ) -> tuple[str, str, str]:
+        """Returns (verdict, detail, raw). verdict is "pass", "improve", or "fail"."""
         provider = self.config.ai_provider.lower()
         description = self._build_post_description(post_with_context)
         image_urls = self._get_image_urls(post_with_context)
@@ -610,58 +623,59 @@ class AINoteGenerator:
                 raw = self._chat_completion(payload)
         except Exception as ex:
             logger.warning("Self-evaluation failed: %s", ex)
-            return ("pass", "")
+            return ("pass", "", "")
 
         logger.info("Self-evaluation response: %s", raw)
-        return self._parse_eval_result(raw)
+        verdict, detail = self._parse_eval_result(raw)
+        return (verdict, detail, raw)
 
     def _rewrite_note(
-            self,
-            post_with_context: PostWithContext,
-            original_note: str,
-            feedback: str,
-            search_results: str,
-        ) -> str | None:
-            provider = self.config.ai_provider.lower()
-            description = self._build_post_description(post_with_context)
-            image_urls = self._get_image_urls(post_with_context)
-            prompt = self._get_prompt_for_note_rewrite(description, original_note, feedback, search_results)
+        self,
+        post_with_context: PostWithContext,
+        rewrite_history: list[dict[str, str]],
+        search_results: str,
+    ) -> str | None:
+        provider = self.config.ai_provider.lower()
+        description = self._build_post_description(post_with_context)
+        image_urls = self._get_image_urls(post_with_context)
+        history_text = self._build_rewrite_history_text(rewrite_history)
+        prompt = self._get_prompt_for_note_rewrite(description, history_text, search_results)
 
-            try:
-                sys_prompt = self._p("system_prompts", "note_rewrite")
-                if provider in {"claude", "claude_agent", "claude-agent"}:
-                    raw = self._claude_completion(
-                        prompt=prompt,
-                        system_prompt=sys_prompt,
-                        allow_web_tools=True,
-                        images=image_urls or None,
-                    )
-                else:
-                    payload: dict[str, Any] = {
-                        "model": self.config.ai_model,
-                        "temperature": 0.3,
-                        "messages": [
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": prompt},
-                        ],
-                    }
-                    raw = self._chat_completion(payload)
-            except Exception as ex:
-                logger.warning("Note rewrite failed: %s", ex)
-                return None
+        try:
+            sys_prompt = self._p("system_prompts", "note_rewrite")
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    allow_web_tools=True,
+                    images=image_urls or None,
+                )
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.3,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Note rewrite failed: %s", ex)
+            return None
 
-            logger.info("Rewritten note:\n%s", raw)
+        logger.info("Rewritten note:\n%s", raw)
 
-            if NO_NOTE_NEEDED in raw.upper():
-                return None
-            if NOT_ENOUGH_EVIDENCE in raw.upper():
-                return None
-            if not self._extract_urls(raw):
-                return None
-            if "#" in raw:
-                return None
+        if NO_NOTE_NEEDED in raw.upper():
+            return None
+        if NOT_ENOUGH_EVIDENCE in raw.upper():
+            return None
+        if not self._extract_urls(raw):
+            return None
+        if "#" in raw:
+            return None
 
-            return raw.strip()
+        return raw.strip()
 
     # ── Main entry point ──
 
@@ -730,21 +744,22 @@ class AINoteGenerator:
         # ── Self-evaluation with up to 3 rewrites ──
         max_rewrites = 3
         rewrite_count = 0
-        verdict, detail = self._self_evaluate_note(post_with_context, note_text)
+        rewrite_history: list[dict[str, str]] = []
+        verdict, detail, eval_raw = self._self_evaluate_note(post_with_context, note_text)
 
         while verdict == "improve" and rewrite_count < max_rewrites:
             rewrite_count += 1
+            rewrite_history.append({"note": note_text, "feedback": eval_raw})
             logger.info("Self-evaluation requested improvement (rewrite %d/%d): %s", rewrite_count, max_rewrites, detail)
-            rewritten = self._rewrite_note(post_with_context, note_text, detail, search_results)
+            rewritten = self._rewrite_note(post_with_context, rewrite_history, search_results)
             if rewritten is None:
                 draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
                 return NoteGenerationResult(draft=draft, reason="rewrite_gave_up", rewrite_count=rewrite_count)
 
             note_text = rewritten
-            verdict, detail = self._self_evaluate_note(post_with_context, note_text)
+            verdict, detail, eval_raw = self._self_evaluate_note(post_with_context, note_text)
 
         if verdict == "improve":
-            # Still IMPROVE after max rewrites — report but do not submit
             logger.info("Still IMPROVE after %d rewrites, not submitting", max_rewrites)
             draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
             return NoteGenerationResult(draft=draft, reason="self_eval_improve_after_max_rewrites", rewrite_count=rewrite_count)
