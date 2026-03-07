@@ -534,33 +534,51 @@ class AINoteGenerator:
             return ""
 
     def _parse_eval_result(self, raw: str) -> tuple[str, str]:
-            """Parse self-evaluation response. Returns (verdict, detail).
-            verdict is one of: "pass", "improve", "fail"
-            """
-            cleaned = raw.strip()
+        """Parse self-evaluation response. Returns (verdict, detail).
+        verdict is one of: "pass", "improve", "fail"
+        """
+        cleaned = raw.strip()
 
-            for line in cleaned.split("\n"):
-                line = line.strip().strip("*").strip("-").strip()
-                if not line:
-                    continue
-                upper = line.upper()
-
-                if upper.startswith("PASS"):
-                    return ("pass", "")
-                if upper.startswith("IMPROVE"):
-                    detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
-                    return ("improve", detail)
-                if upper.startswith("FAIL"):
-                    detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
-                    return ("fail", detail)
-
-            # No explicit verdict found - check entire text
-            upper_all = cleaned.upper()
-            if "PASS" in upper_all:
+        # "Verdict: PASS" / "**Verdict: FAIL**" / "**Verdict**: IMPROVE" etc.
+        no_stars = cleaned.replace("*", "")
+        verdict_match = re.search(
+            r"Verdict\s*:\s*(PASS|IMPROVE|FAIL)",
+            no_stars,
+            re.IGNORECASE,
+        )
+        if verdict_match:
+            v = verdict_match.group(1).upper()
+            if v == "PASS":
                 return ("pass", "")
-            if "IMPROVE" in upper_all:
-                return ("improve", cleaned)
+            detail = cleaned[verdict_match.end():]
+            detail = detail.lstrip(":").lstrip("*").strip()
+            return (v.lower(), detail or cleaned)
+
+        # Line-by-line scan
+        for line in cleaned.split("\n"):
+            line = line.strip().strip("*").strip("-").strip()
+            if not line:
+                continue
+            upper = line.upper()
+
+            if upper.startswith("PASS"):
+                return ("pass", "")
+            if upper.startswith("IMPROVE"):
+                detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
+                return ("improve", detail)
+            if upper.startswith("FAIL"):
+                detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
+                return ("fail", detail)
+
+        # Fallback: keyword search (strict order to avoid false positives)
+        upper_all = cleaned.upper()
+        if "FAIL" in upper_all:
             return ("fail", cleaned)
+        if "IMPROVE" in upper_all:
+            return ("improve", cleaned)
+        if "PASS" in upper_all:
+            return ("pass", "")
+        return ("fail", cleaned)
 
     def _self_evaluate_note(
         self, post_with_context: PostWithContext, note_text: str
