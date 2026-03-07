@@ -9,12 +9,14 @@ from curl_cffi import requests as curl_requests
 
 from .ai_writer import AINoteGenerator
 from .config import AppConfig
-from .models import NoteProcessResult, ProposedNote, RunSummary
+from .models import NoteProcessResult, PostWithContext, ProposedNote, RunSummary
 from .x_client import XCommunityNotesClient
 import requests
 import html
 import re
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,245 @@ class CommunityNoteWriterService:
         self.x_client = XCommunityNotesClient(config)
         self.ai = AINoteGenerator(config)
 
+    def _process_single_post(
+        self,
+        idx: int,
+        total: int,
+        pwc: PostWithContext,
+        *,
+        test_mode: bool,
+        submit_notes: bool,
+        evaluate_before_submit: bool,
+        min_claim_opinion_score: float,
+        enable_url_check: bool,
+        url_check_timeout_sec: int,
+        already_noted_post_ids: set[str],
+        cached_post_ids: set[str],
+        processed_this_run: set[str],
+        results: list[NoteProcessResult],
+        lock: threading.Lock,
+        _progress: Callable[[str], None],
+    ) -> None:
+        try:
+            _progress(f"[{idx}/{total}] Processing post_id={pwc.post.post_id}")
+            _progress(f"Original post: {pwc.post.text}")
+
+            with lock:
+                if pwc.post.post_id in processed_this_run:
+                    _progress("Skipped: duplicate in current run")
+                    return
+                processed_this_run.add(pwc.post.post_id)
+
+            with lock:
+                if pwc.post.post_id in cached_post_ids:
+                    _progress("Skipped: already processed in a previous run")
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason="already_processed_cached",
+                        )
+                    )
+                    return
+
+            if pwc.post.post_id in already_noted_post_ids:
+                _progress("Skipped: note already submitted for this post")
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason="Already submitted note for this post",
+                        )
+                    )
+                    cached_post_ids.add(pwc.post.post_id)
+                return
+
+            _progress("Generating note draft...")
+            gen_result = self.ai.generate_note(pwc)
+            draft = gen_result.draft
+            reason = gen_result.reason
+
+            with lock:
+                cached_post_ids.add(pwc.post.post_id)
+
+            is_self_eval_skip = (
+                reason.startswith("self_eval_failed")
+                or reason == "rewrite_gave_up"
+                or reason == "self_eval_improve_after_max_rewrites"
+            )
+
+            if draft is None:
+                _progress(f"Skipped: {reason}")
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason=reason,
+                        )
+                    )
+                return
+
+            if is_self_eval_skip:
+                _progress(f"Skipped: {reason}")
+                progress_label = f"{idx}/{total}"
+                _send_discord_notification(
+                    webhook_url=self.config.discord_webhook_url,
+                    post_id=pwc.post.post_id,
+                    note_text=draft.note_text,
+                    evaluation=None,
+                    test_mode=test_mode,
+                    progress_label=progress_label,
+                    rewrite_count=gen_result.rewrite_count,
+                    skipped_reason=reason,
+                )
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason=reason,
+                            generated_note=draft.note_text,
+                        )
+                    )
+                return
+
+            score = None
+            evaluation = None
+            if evaluate_before_submit:
+                _progress("Evaluating note quality...")
+                try:
+                    evaluation = self.x_client.evaluate_note(
+                        post_id=pwc.post.post_id,
+                        note_text=draft.note_text,
+                    )
+                    logger.info("Evaluation response: %s", evaluation)
+                    score = (
+                        evaluation.get("data", {}).get("claim_opinion_score")
+                        if isinstance(evaluation, dict)
+                        else None
+                    )
+                    _progress(f"claim_opinion_score={score}")
+                except Exception as eval_ex:
+                    _progress(f"Evaluation failed: {eval_ex}")
+                    evaluation = {"error": str(eval_ex)}
+
+            progress_label = f"{idx}/{total}"
+            _send_discord_notification(
+                webhook_url=self.config.discord_webhook_url,
+                post_id=pwc.post.post_id,
+                note_text=draft.note_text,
+                evaluation=evaluation,
+                test_mode=test_mode,
+                progress_label=progress_label,
+                rewrite_count=gen_result.rewrite_count,
+            )
+
+            if score is not None and score < min_claim_opinion_score:
+                _progress(f"Skipped: claim_opinion_score too low ({score})")
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason=f"claim_opinion_score too low: {score}",
+                            generated_note=draft.note_text,
+                            claim_opinion_score=score,
+                        )
+                    )
+                return
+
+            if submit_notes:
+                _progress("Submitting note...")
+
+                if enable_url_check:
+                    parsed_variants = _extract_urls(unescape(draft.note_text))
+                    ok = True
+                    bad_urls: list[str] = []
+                    if parsed_variants:
+
+                        def _check_fn(url: str) -> bool:
+                            try:
+                                resp = curl_requests.head(
+                                    url,
+                                    impersonate="chrome",
+                                    allow_redirects=True,
+                                    timeout=url_check_timeout_sec,
+                                )
+                                if resp.status_code >= 400:
+                                    resp = curl_requests.get(
+                                        url,
+                                        impersonate="chrome",
+                                        allow_redirects=True,
+                                        timeout=url_check_timeout_sec,
+                                    )
+                                return 200 <= resp.status_code < 400
+                            except Exception:
+                                return False
+
+                        ok, bad_urls = check_all_urls_for_note(draft.note_text, _check_fn)
+                    else:
+                        urls = getattr(pwc.post, "suggested_source_links", []) or []
+                        if urls:
+                            ok, bad_urls = self._check_urls(urls, url_check_timeout_sec)
+
+                    _progress(f"URL check: ok={ok}, bad={bad_urls}")
+
+                    if not ok:
+                        _progress(f"Skipped: invalid URLs: {', '.join(bad_urls)}")
+                        with lock:
+                            results.append(
+                                NoteProcessResult(
+                                    post_id=pwc.post.post_id,
+                                    status="skipped",
+                                    reason=f"Invalid URLs: {', '.join(bad_urls)}",
+                                    generated_note=draft.note_text,
+                                    claim_opinion_score=score,
+                                )
+                            )
+                        return
+
+                note = ProposedNote(
+                    post_id=pwc.post.post_id,
+                    note_text=draft.note_text,
+                    misleading_tags=draft.misleading_tags,
+                    trustworthy_sources=True,
+                )
+                submission = self.x_client.submit_note(note=note, test_mode=test_mode)
+                _progress("Submitted")
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="submitted",
+                            generated_note=draft.note_text,
+                            claim_opinion_score=score,
+                            submission_response=submission,
+                        )
+                    )
+            else:
+                _progress(f"Draft created (submit_notes=False):\n{draft.note_text}")
+                with lock:
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="drafted",
+                            generated_note=draft.note_text,
+                            claim_opinion_score=score,
+                        )
+                    )
+        except Exception as ex:
+            _progress(f"Error: {ex}")
+            with lock:
+                results.append(
+                    NoteProcessResult(
+                        post_id=pwc.post.post_id,
+                        status="error",
+                        reason=str(ex),
+                    )
+                )
+
     def run_once(
         self,
         num_posts: int,
@@ -168,215 +409,49 @@ class CommunityNoteWriterService:
 
         results: list[NoteProcessResult] = []
         processed_this_run: set[str] = set()
-        for idx, pwc in enumerate(posts, start=1):
-            try:
-                _progress(f"[{idx}/{len(posts)}] Processing post_id={pwc.post.post_id}")
-                _progress(f"Original post: {pwc.post.text}")
+        lock = threading.Lock()
+        max_workers = self.config.max_concurrent_posts
 
-                if pwc.post.post_id in processed_this_run:
-                    _progress("Skipped: duplicate in current run")
-                    continue
-                processed_this_run.add(pwc.post.post_id)
+        common_kwargs = dict(
+            total=len(posts),
+            test_mode=test_mode,
+            submit_notes=submit_notes,
+            evaluate_before_submit=evaluate_before_submit,
+            min_claim_opinion_score=min_claim_opinion_score,
+            enable_url_check=enable_url_check,
+            url_check_timeout_sec=url_check_timeout_sec,
+            already_noted_post_ids=already_noted_post_ids,
+            cached_post_ids=cached_post_ids,
+            processed_this_run=processed_this_run,
+            results=results,
+            lock=lock,
+            _progress=_progress,
+        )
 
-                if pwc.post.post_id in cached_post_ids:
-                    _progress("Skipped: already processed in a previous run")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="skipped",
-                            reason="already_processed_cached",
-                        )
-                    )
-                    continue
-
-                if pwc.post.post_id in already_noted_post_ids:
-                    _progress("Skipped: note already submitted for this post")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="skipped",
-                            reason="Already submitted note for this post",
-                        )
-                    )
-                    cached_post_ids.add(pwc.post.post_id)
-                    continue
-
-                _progress("Generating note draft...")
-                gen_result = self.ai.generate_note(pwc)
-                draft = gen_result.draft
-                reason = gen_result.reason
-
-                cached_post_ids.add(pwc.post.post_id)
-
-                is_self_eval_skip = (
-                    reason.startswith("self_eval_failed")
-                    or reason == "rewrite_gave_up"
-                    or reason == "self_eval_improve_after_max_rewrites"
-                )
-
-                if draft is None:
-                    _progress(f"Skipped: {reason}")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="skipped",
-                            reason=reason,
-                        )
-                    )
-                    continue
-
-                if is_self_eval_skip:
-                    _progress(f"Skipped: {reason}")
-                    progress_label = f"{idx}/{len(posts)}"
-                    _send_discord_notification(
-                        webhook_url=self.config.discord_webhook_url,
-                        post_id=pwc.post.post_id,
-                        note_text=draft.note_text,
-                        evaluation=None,
-                        test_mode=test_mode,
-                        progress_label=progress_label,
-                        rewrite_count=gen_result.rewrite_count,
-                        skipped_reason=reason,
-                    )
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="skipped",
-                            reason=reason,
-                            generated_note=draft.note_text,
-                        )
-                    )
-                    continue
-
-                score = None
-                evaluation = None
-                if evaluate_before_submit:
-                    _progress("Evaluating note quality...")
-                    try:
-                        evaluation = self.x_client.evaluate_note(
-                            post_id=pwc.post.post_id,
-                            note_text=draft.note_text,
-                        )
-                        logger.info("Evaluation response: %s", evaluation)
-                        score = (
-                            evaluation.get("data", {}).get("claim_opinion_score")
-                            if isinstance(evaluation, dict)
-                            else None
-                        )
-                        _progress(f"claim_opinion_score={score}")
-                    except Exception as eval_ex:
-                        _progress(f"Evaluation failed: {eval_ex}")
-                        evaluation = {"error": str(eval_ex)}
-
-                progress_label = f"{idx}/{len(posts)}"
-                _send_discord_notification(
-                    webhook_url=self.config.discord_webhook_url,
-                    post_id=pwc.post.post_id,
-                    note_text=draft.note_text,
-                    evaluation=evaluation,
-                    test_mode=test_mode,
-                    progress_label=progress_label,
-                    rewrite_count=gen_result.rewrite_count,
-                )
-
-                if score is not None and score < min_claim_opinion_score:
-                    _progress(f"Skipped: claim_opinion_score too low ({score})")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="skipped",
-                            reason=f"claim_opinion_score too low: {score}",
-                            generated_note=draft.note_text,
-                            claim_opinion_score=score,
-                        )
-                    )
-                    continue
-
-                if submit_notes:
-                    _progress("Submitting note...")
-
-                    if enable_url_check:
-                        parsed_variants = _extract_urls(unescape(draft.note_text))
-                        ok = True
-                        bad_urls: list[str] = []
-                        if parsed_variants:
-                            
-                            def _check_fn(url: str) -> bool:
-                                try:
-                                    resp = curl_requests.head(
-                                        url,
-                                        impersonate="chrome",
-                                        allow_redirects=True,
-                                        timeout=url_check_timeout_sec,
-                                    )
-                                    if resp.status_code >= 400:
-                                        resp = curl_requests.get(
-                                            url,
-                                            impersonate="chrome",
-                                            allow_redirects=True,
-                                            timeout=url_check_timeout_sec,
-                                        )
-                                    return 200 <= resp.status_code < 400
-                                except Exception:
-                                    return False
-
-                            ok, bad_urls = check_all_urls_for_note(draft.note_text, _check_fn)
-                        else:
-                            urls = getattr(pwc.post, "suggested_source_links", []) or []
-                            if urls:
-                                ok, bad_urls = self._check_urls(urls, url_check_timeout_sec)
-
-                        _progress(f"URL check: ok={ok}, bad={bad_urls}")
-
-                        if not ok:
-                            _progress(f"Skipped: invalid URLs: {', '.join(bad_urls)}")
+        if max_workers <= 1:
+            for idx, pwc in enumerate(posts, start=1):
+                self._process_single_post(idx=idx, pwc=pwc, **common_kwargs)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self._process_single_post, idx=idx, pwc=pwc, **common_kwargs,
+                    ): pwc
+                    for idx, pwc in enumerate(posts, start=1)
+                }
+                for future in as_completed(futures):
+                    exc = future.exception()
+                    if exc is not None:
+                        pwc = futures[future]
+                        _progress(f"Unexpected thread error for post_id={pwc.post.post_id}: {exc}")
+                        with lock:
                             results.append(
                                 NoteProcessResult(
                                     post_id=pwc.post.post_id,
-                                    status="skipped",
-                                    reason=f"Invalid URLs: {', '.join(bad_urls)}",
-                                    generated_note=draft.note_text,
-                                    claim_opinion_score=score,
+                                    status="error",
+                                    reason=f"thread_error: {exc}",
                                 )
                             )
-                            continue
-
-                    note = ProposedNote(
-                        post_id=pwc.post.post_id,
-                        note_text=draft.note_text,
-                        misleading_tags=draft.misleading_tags,
-                        trustworthy_sources=True,
-                    )
-                    submission = self.x_client.submit_note(note=note, test_mode=test_mode)
-                    _progress("Submitted")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="submitted",
-                            generated_note=draft.note_text,
-                            claim_opinion_score=score,
-                            submission_response=submission,
-                        )
-                    )
-                else:
-                    _progress(f"Draft created (submit_notes=False):\n{draft.note_text}")
-                    results.append(
-                        NoteProcessResult(
-                            post_id=pwc.post.post_id,
-                            status="drafted",
-                            generated_note=draft.note_text,
-                            claim_opinion_score=score,
-                        )
-                    )
-            except Exception as ex:
-                _progress(f"Error: {ex}")
-                results.append(
-                    NoteProcessResult(
-                        post_id=pwc.post.post_id,
-                        status="error",
-                        reason=str(ex),
-                    )
-                )
 
         _save_processed_posts(cached_post_ids)
         _progress(f"Saved {len(cached_post_ids)} processed posts to cache")
