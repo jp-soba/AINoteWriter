@@ -358,7 +358,7 @@ class CommunityNoteWriterService:
         enable_url_check: bool = False,
         url_check_timeout_sec: int = 5,
         progress_callback: Callable[[str], None] | None = None,
-        feed_lang: str = "ja",
+        feed_lang: str | None = None,
     ) -> RunSummary:
         self.ai = AINoteGenerator(self.config, feed_lang=feed_lang)
 
@@ -387,7 +387,7 @@ class CommunityNoteWriterService:
         cached_post_ids = _load_processed_posts()
         _progress(f"Loaded {len(cached_post_ids)} previously processed posts from cache")
 
-        post_selection = f"feed_lang:{feed_lang}"
+        post_selection = f"feed_lang:{feed_lang}" if feed_lang else None
 
         _progress(f"Fetching posts eligible for notes (post_selection={post_selection})...")
         posts = self.x_client.get_posts_eligible_for_notes(
