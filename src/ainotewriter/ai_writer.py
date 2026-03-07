@@ -127,6 +127,7 @@ class AINoteGenerator:
             tools = ["WebSearch", "WebFetch"]
             if mcp_config:
                 tools.append("mcp__pdf-reader__*")
+                tools.append("mcp__note-tools__*")
             args += ["--allowedTools", ",".join(tools)]
         return args
 
