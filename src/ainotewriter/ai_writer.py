@@ -32,6 +32,7 @@ class AINoteDraft:
 class NoteGenerationResult:
     draft: AINoteDraft | None
     reason: str
+    rewrite_count: int = 0
 
 
 class AINoteGenerator:
@@ -397,6 +398,18 @@ class AINoteGenerator:
     {post_with_context_description}
     """.strip()
 
+    def _get_note_text_rules(self) -> str:
+        return """ノート本文ルール:
+- URLを除いた本文は 280 文字以内を目安に簡潔に記述すること
+- 体言止めなどの不自然な省略表現は避ける
+- 文体は丁寧語で統一すること
+- ノートは短い方が好まれる傾向にある。ただし、重要な情報は省略しないこと
+- 少なくとも1つのURLを本文に含める。異なる2つの情報源があると尚良い。
+- URLはそのまま記載（[Source]やカッコで囲む, URLの直前や直後にURL以外のテキストを入れる等の装飾禁止）。URL以外のテキストとは、改行等で区切ること
+- ハッシュタグ、絵文字、煽り表現は禁止
+- 意見ではなく、検証可能な事実と文脈補足を中心に書く
+- 冒頭に「Community Note:」等の前置きは付けない"""
+
     def _get_prompt_for_note_writing(
         self,
         post_with_context_description: str,
@@ -409,16 +422,7 @@ class AINoteGenerator:
 2) 必要性はあるが根拠不足なら "NOT ENOUGH EVIDENCE TO WRITE A GOOD COMMUNITY NOTE." のみを返す
 3) 根拠が十分な場合のみ、ノート本文のみを返す
 
-ノート本文ルール:
-- URLを除いた本文は 280 文字以内を目安に簡潔に記述すること
-- 体言止めなどの不自然な省略表現は避ける
-- 文体は丁寧語で統一すること
-- ノートは短い方が好まれる傾向にある。ただし、重要な情報は省略しないこと
-- 少なくとも1つのURLを本文に含める。異なる2つの情報源があると尚良い。
-- URLはそのまま記載（[Source]やカッコで囲む, URLの直前や直後にURL以外のテキストを入れる等の装飾禁止）。URL以外のテキストとは、改行等で区切ること
-- ハッシュタグ、絵文字、煽り表現は禁止
-- 意見ではなく、検証可能な事実と文脈補足を中心に書く
-- 冒頭に「Community Note:」等の前置きは付けない
+{self._get_note_text_rules()}
 
 判断方針:
 - 迷う場合は書かない（NO NOTE NEEDED か NOT ENOUGH EVIDENCE を返す）
@@ -481,9 +485,10 @@ class AINoteGenerator:
 
 書き直しルール:
 - フィードバックの指摘を反映する
-- それ以外のルールは元のノート作成時と同じ（URLを除いた本文は280文字以内目安、丁寧語、URL必須、意見禁止等）
+- ノート本文のみを返す（前置き不要。前のノートから変更した点を示す必要もなし。あなたの応答がそのままノートとして提出されます）
 - 改善できない場合は "NO NOTE NEEDED." と返す
-- ノート本文のみを返す（前置き不要）
+
+{self._get_note_text_rules()}
 
 [投稿]
 {post_with_context_description}
@@ -776,29 +781,35 @@ class AINoteGenerator:
 
         note_text = raw.strip()
 
-        # ── Self-evaluation with 1 retry ──
+        # ── Self-evaluation with up to 3 rewrites ──
+        max_rewrites = 3
+        rewrite_count = 0
         verdict, detail = self._self_evaluate_note(post_with_context, note_text)
 
-        if verdict == "improve":
-            logger.info("Self-evaluation requested improvement: %s", detail)
+        while verdict == "improve" and rewrite_count < max_rewrites:
+            rewrite_count += 1
+            logger.info("Self-evaluation requested improvement (rewrite %d/%d): %s", rewrite_count, max_rewrites, detail)
             rewritten = self._rewrite_note(post_with_context, note_text, detail, search_results)
             if rewritten is None:
                 draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
-                return NoteGenerationResult(draft=draft, reason="rewrite_gave_up")
+                return NoteGenerationResult(draft=draft, reason="rewrite_gave_up", rewrite_count=rewrite_count)
 
             note_text = rewritten
             verdict, detail = self._self_evaluate_note(post_with_context, note_text)
 
-            if verdict == "fail":
-                draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
-                return NoteGenerationResult(draft=draft, reason=f"self_eval_failed_after_rewrite: {detail}")
-
-        elif verdict == "fail":
+        if verdict == "improve":
+            # Still IMPROVE after max rewrites — report but do not submit
+            logger.info("Still IMPROVE after %d rewrites, not submitting", max_rewrites)
             draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
-            return NoteGenerationResult(draft=draft, reason=f"self_eval_failed: {detail}")
+            return NoteGenerationResult(draft=draft, reason="self_eval_improve_after_max_rewrites", rewrite_count=rewrite_count)
+
+        if verdict == "fail":
+            draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+            reason = f"self_eval_failed_after_rewrite: {detail}" if rewrite_count > 0 else f"self_eval_failed: {detail}"
+            return NoteGenerationResult(draft=draft, reason=reason, rewrite_count=rewrite_count)
 
         draft = AINoteDraft(
             note_text=note_text,
             misleading_tags=["missing_important_context"],
         )
-        return NoteGenerationResult(draft=draft, reason="ok")
+        return NoteGenerationResult(draft=draft, reason="ok", rewrite_count=rewrite_count)

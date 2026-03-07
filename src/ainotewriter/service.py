@@ -46,6 +46,8 @@ def _send_discord_notification(
     evaluation: dict[str, Any] | None,
     test_mode: bool,
     progress_label: str,
+    rewrite_count: int = 0,
+    skipped_reason: str | None = None,
 ) -> None:
     if not webhook_url:
         return
@@ -79,7 +81,11 @@ def _send_discord_notification(
         )
 
     mode_label = "テストモード" if test_mode else "本番モード"
-    embeds[-1]["footer"] = {"text": f"{mode_label} | {progress_label}"}
+    rewrite_label = f"書き直し: {rewrite_count}/3"
+    footer_parts = [mode_label, progress_label, rewrite_label]
+    if skipped_reason:
+        footer_parts.append(f"提出スキップ: {skipped_reason}")
+    embeds[-1]["footer"] = {"text": " | ".join(footer_parts)}
 
     payload = {
         "content": f"https://x.com/i/status/{post_id}",
@@ -197,16 +203,42 @@ class CommunityNoteWriterService:
 
                 cached_post_ids.add(pwc.post.post_id)
 
-                is_self_eval_skip = reason.startswith("self_eval_failed") or reason == "rewrite_gave_up"
+                is_self_eval_skip = (
+                    reason.startswith("self_eval_failed")
+                    or reason == "rewrite_gave_up"
+                    or reason == "self_eval_improve_after_max_rewrites"
+                )
 
-                if draft is None or is_self_eval_skip:
+                if draft is None:
                     _progress(f"Skipped: {reason}")
                     results.append(
                         NoteProcessResult(
                             post_id=pwc.post.post_id,
                             status="skipped",
                             reason=reason,
-                            generated_note=draft.note_text if draft else None,
+                        )
+                    )
+                    continue
+
+                if is_self_eval_skip:
+                    _progress(f"Skipped: {reason}")
+                    progress_label = f"{idx}/{len(posts)}"
+                    _send_discord_notification(
+                        webhook_url=self.config.discord_webhook_url,
+                        post_id=pwc.post.post_id,
+                        note_text=draft.note_text,
+                        evaluation=None,
+                        test_mode=test_mode,
+                        progress_label=progress_label,
+                        rewrite_count=gen_result.rewrite_count,
+                        skipped_reason=reason,
+                    )
+                    results.append(
+                        NoteProcessResult(
+                            post_id=pwc.post.post_id,
+                            status="skipped",
+                            reason=reason,
+                            generated_note=draft.note_text,
                         )
                     )
                     continue
@@ -239,6 +271,7 @@ class CommunityNoteWriterService:
                     evaluation=evaluation,
                     test_mode=test_mode,
                     progress_label=progress_label,
+                    rewrite_count=gen_result.rewrite_count,
                 )
 
                 if score is not None and score < min_claim_opinion_score:
