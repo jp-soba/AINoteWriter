@@ -46,7 +46,7 @@ class NoteGenerationResult:
 
 
 class AINoteGenerator:
-    def __init__(self, config: AppConfig, feed_lang: str = "ja"):
+    def __init__(self, config: AppConfig, feed_lang: str | None = None):
         self.config = config
         self.lang = "ja" if feed_lang == "ja" else "en"
 
@@ -109,6 +109,26 @@ class AINoteGenerator:
     @staticmethod
     def _extract_urls(text: str) -> list[str]:
         return re.findall(r"https?://[^\s)]+", text)
+
+    # ── MCP / CLI helpers ──
+
+    def _get_mcp_config_path(self) -> str | None:
+        path = Path(self.config.claude_mcp_config_path)
+        if path.exists():
+            return str(path.resolve())
+        return None
+
+    def _build_cli_tool_args(self, allow_web_tools: bool) -> list[str]:
+        args: list[str] = []
+        mcp_config = self._get_mcp_config_path()
+        if mcp_config:
+            args += ["--mcp-config", mcp_config]
+        if allow_web_tools:
+            tools = ["WebSearch", "WebFetch"]
+            if mcp_config:
+                tools.append("mcp__pdf-reader__*")
+            args += ["--allowedTools", ",".join(tools)]
+        return args
 
     # ── LLM call helpers ──
 
@@ -275,8 +295,7 @@ class AINoteGenerator:
             "--output-format", "stream-json",
             "--verbose",
         ]
-        if allow_web_tools:
-            cmd += ["--allowedTools", "WebSearch,WebFetch"]
+        cmd += self._build_cli_tool_args(allow_web_tools)
 
         proc = subprocess.run(
             cmd, input=stream_input, capture_output=True, text=True,
@@ -303,8 +322,7 @@ class AINoteGenerator:
 
         full_prompt = f"{system_prompt}\n\n{prompt}".strip()
         cmd = [self.config.claude_cli_path, "--print"]
-        if allow_web_tools:
-            cmd += ["--allowedTools", "WebSearch,WebFetch"]
+        cmd += self._build_cli_tool_args(allow_web_tools)
         proc = subprocess.run(
             cmd,
             input=full_prompt,

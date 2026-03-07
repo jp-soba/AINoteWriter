@@ -58,8 +58,10 @@ jobs:
           pip install -r requirements.txt
           pip install -e .
 
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install Claude CLI and MCP dependencies
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          npm install -g @sylphx/pdf-reader-mcp
 
       - name: Restore processed posts cache
         uses: actions/cache@v4

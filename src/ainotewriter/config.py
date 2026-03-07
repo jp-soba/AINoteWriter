@@ -32,8 +32,10 @@ class AppConfig:
     claude_cli_path: str = "claude"
     claude_max_turns: int = 4
     claude_use_cli_fallback: bool = True
+    claude_mcp_config_path: str = "mcp_config.json"
 
     discord_webhook_url: str = ""
+    max_concurrent_posts: int = 2
 
     default_num_posts: int = 5
     default_test_mode: bool = True
@@ -62,7 +64,9 @@ class AppConfig:
             claude_use_cli_fallback=_as_bool(
                 os.getenv("CLAUDE_USE_CLI_FALLBACK"), True
             ),
+            claude_mcp_config_path=os.getenv("CLAUDE_MCP_CONFIG_PATH", "mcp_config.json"),
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
+            max_concurrent_posts=int(os.getenv("MAX_CONCURRENT_POSTS", "2")),
             default_num_posts=int(os.getenv("DEFAULT_NUM_POSTS", "5")),
             default_test_mode=_as_bool(os.getenv("DEFAULT_TEST_MODE"), True),
             default_submit_notes=_as_bool(os.getenv("DEFAULT_SUBMIT_NOTES"), False),
