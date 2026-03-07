@@ -34,6 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--min-claim-opinion-score", type=float, default=None)
     run_p.add_argument("--enable-url-check", type=_parse_bool, default=None)
     run_p.add_argument("--url-check-timeout", type=int, default=None)
+    run_p.add_argument("--feed-lang", type=str, default=None, choices=["ja", "all"])
 
     notes_p = sub.add_parser("notes", help="Fetch notes written by this account")
     notes_p.add_argument("--test-mode", type=_parse_bool, default=None)
@@ -47,7 +48,6 @@ def main() -> None:
     args = parser.parse_args()
 
     config = AppConfig.from_env()
-    # Ensure CLI shows progress logs (goes to stderr) at INFO level
     logging.basicConfig(level=logging.INFO)
     service = CommunityNoteWriterService(config)
 
@@ -76,6 +76,7 @@ def main() -> None:
                 if args.url_check_timeout is not None
                 else config.url_check_timeout_sec
             ),
+            feed_lang=args.feed_lang or "ja",
         )
         path = save_summary(summary)
         print(json.dumps(asdict(summary), ensure_ascii=False, indent=2))
