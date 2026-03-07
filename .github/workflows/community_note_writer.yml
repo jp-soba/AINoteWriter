@@ -34,9 +34,9 @@ on:
         required: false
         default: "5"
       feed_lang:
-        description: "Feed language filter (ja or all)"
+        description: "Feed language filter (ja, all, or empty for English only)"
         required: false
-        default: "ja"
+        default: ""
   schedule:
     - cron: "*/30 * * * *"
 
@@ -80,6 +80,12 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          FEED_LANG="${{ github.event.inputs.feed_lang }}"
+          FEED_LANG_ARG=""
+          if [ -n "$FEED_LANG" ]; then
+            FEED_LANG_ARG="--feed-lang $FEED_LANG"
+          fi
+
           ai-note-writer run \
             --num-posts "${{ github.event.inputs.num_posts || '10' }}" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
@@ -87,7 +93,7 @@ jobs:
             --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
             --enable-url-check=${{ github.event.inputs.enable_url_check || 'true' }} \
             --url-check-timeout "${{ github.event.inputs.url_check_timeout || '5' }}" \
-            --feed-lang "${{ github.event.inputs.feed_lang || 'ja' }}"
+            $FEED_LANG_ARG
 
       - name: Upload outputs
         if: always()

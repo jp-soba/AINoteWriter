@@ -76,7 +76,7 @@ def main() -> None:
                 if args.url_check_timeout is not None
                 else config.url_check_timeout_sec
             ),
-            feed_lang=args.feed_lang or "ja",
+            feed_lang=args.feed_lang or None,
         )
         path = save_summary(summary)
         print(json.dumps(asdict(summary), ensure_ascii=False, indent=2))

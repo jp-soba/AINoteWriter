@@ -14,7 +14,8 @@ X の Community Notes AI Writer を、以下 2 つの実行経路に対応させ
 ## 機能
 
 - `posts_eligible_for_notes` の取得
-  - `post_selection=feed_lang:ja` で固定
+  - `--feed-lang` 未指定時は英語のみ（API デフォルト）
+  - `--feed-lang ja` で日本語、`--feed-lang all` で全言語
 - AI でノート下書き生成（OpenAI 互換エンドポイント）
 - `evaluate_note` で事前評価（任意）
 - `notes` への投稿（任意）
@@ -89,20 +90,22 @@ CLAUDE_USE_CLI_FALLBACK=true
 
 ## CLI 実行
 
-### 1) 下書きのみ（投稿しない）
-
+### 1) 英語フィード（デフォルト）で下書きのみ
 ```bash
 ai-note-writer run --num-posts 5 --test-mode true --submit-notes false --evaluate-before-submit true
 ```
 
-### 2) 投稿あり（test_mode=true のまま推奨）
-
+### 2) 日本語フィードで投稿あり
 ```bash
-ai-note-writer run --num-posts 5 --test-mode true --submit-notes true --evaluate-before-submit true
+ai-note-writer run --num-posts 5 --test-mode true --submit-notes true --evaluate-before-submit true --feed-lang ja
 ```
 
-### 3) 自分が書いたノートの確認
+### 3) 全言語フィード
+```bash
+ai-note-writer run --num-posts 10 --test-mode true --submit-notes true --feed-lang all
+```
 
+### 4) 自分が書いたノートの確認
 ```bash
 ai-note-writer notes --max-results 20
 ```
@@ -144,6 +147,8 @@ GitHub リポジトリの `Settings > Secrets and variables > Actions` で以下
 
 Actions タブから `Automated Community Note Writer` を手動実行できます。
 成果物は artifact (`writer-outputs`) として保存されます。
+
+デフォルトでは英語フィードを使用します。手動実行時に `feed_lang` を `ja` や `all` に設定することで言語を変更できます。
 
 ---
 
