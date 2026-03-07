@@ -2,3 +2,4 @@ requests>=2.32.3
 requests-oauthlib>=2.0.0
 python-dotenv>=1.0.1
 claude-code-sdk>=0.0.14
+curl_cffi>=0.7.0

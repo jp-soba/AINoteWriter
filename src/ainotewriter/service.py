@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List
+from curl_cffi import requests as curl_requests
 
 from .ai_writer import AINoteGenerator
 from .config import AppConfig
@@ -299,11 +300,22 @@ class CommunityNoteWriterService:
                         ok = True
                         bad_urls: list[str] = []
                         if parsed_variants:
+                            
                             def _check_fn(url: str) -> bool:
                                 try:
-                                    resp = requests.head(url, allow_redirects=True, timeout=url_check_timeout_sec)
+                                    resp = curl_requests.head(
+                                        url,
+                                        impersonate="chrome",
+                                        allow_redirects=True,
+                                        timeout=url_check_timeout_sec,
+                                    )
                                     if resp.status_code >= 400:
-                                        resp = requests.get(url, allow_redirects=True, timeout=url_check_timeout_sec)
+                                        resp = curl_requests.get(
+                                            url,
+                                            impersonate="chrome",
+                                            allow_redirects=True,
+                                            timeout=url_check_timeout_sec,
+                                        )
                                     return 200 <= resp.status_code < 400
                                 except Exception:
                                     return False
