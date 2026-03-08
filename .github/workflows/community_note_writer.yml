@@ -12,7 +12,7 @@ on:
       num_posts:
         description: "Number of eligible posts to process"
         required: false
-        default: "5"
+        default: "10"
       test_mode:
         description: "Use test_mode"
         required: false
@@ -89,7 +89,7 @@ jobs:
           fi
 
           ai-note-writer run \
-            --num-posts "${{ github.event.inputs.num_posts || '5' }}" \
+            --num-posts "${{ github.event.inputs.num_posts || '10' }}" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
             --submit-notes=${{ github.event.inputs.submit_notes || 'true' }} \
             --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
