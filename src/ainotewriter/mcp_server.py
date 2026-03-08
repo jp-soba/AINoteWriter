@@ -1,5 +1,7 @@
 """MCP server providing note utility tools for Community Notes."""
 
+# MCPが使われなくなったのでこのファイルは不要だが、もしかしたら使うかもしれないので残している
+
 from __future__ import annotations
 
 import re

@@ -51,7 +51,6 @@ class AINoteGenerator:
         self.lang = "ja" if feed_lang == "ja" else "en"
 
     def _p(self, category: str, key: str) -> str:
-        """Get a prompt string in the current language."""
         return _PROMPTS[category][key][self.lang]
 
     # ── Post description / media helpers ──
@@ -110,6 +109,12 @@ class AINoteGenerator:
     def _extract_urls(text: str) -> list[str]:
         return re.findall(r"https?://[^\s)]+", text)
 
+    @staticmethod
+    def _count_note_chars(text: str) -> int:
+        """URLを1文字として換算した文字数を返す。"""
+        collapsed = re.sub(r"https?://\S+", "X", text)
+        return len(collapsed)
+
     # ── MCP / CLI helpers ──
 
     def _get_mcp_config_path(self) -> str | None:
@@ -127,7 +132,6 @@ class AINoteGenerator:
             tools = ["WebSearch", "WebFetch"]
             if mcp_config:
                 tools.append("mcp__pdf-reader__*")
-                tools.append("mcp__note-tools__*")
             args += ["--allowedTools", ",".join(tools)]
         return args
 
@@ -234,11 +238,7 @@ class AINoteGenerator:
         return merged
 
     def _parse_stream_json_output(self, raw_output: str) -> str:
-        """Extract only the final assistant message from stream-json output.
-
-        Intermediate outputs (tool calls, tool results, agent thinking)
-        are filtered out since they are already reflected in the final summary.
-        """
+        """Extract the final assistant message from stream-json output."""
         last_assistant_text: str = ""
 
         for line in raw_output.split("\n"):
@@ -442,6 +442,18 @@ class AINoteGenerator:
             search_results=search_results,
         ).strip()
 
+    def _get_prompt_for_char_reduction_check(
+        self,
+        post_with_context_description: str,
+        original_note: str,
+        shortened_note: str,
+    ) -> str:
+        return self._p("prompts", "char_reduction_check").format(
+            post_description=post_with_context_description,
+            original_note=original_note,
+            shortened_note=shortened_note,
+        ).strip()
+
     def _build_rewrite_history_text(self, history: list[dict[str, str]]) -> str:
         if not history:
             return ""
@@ -612,6 +624,44 @@ class AINoteGenerator:
             return ("pass", "")
         return ("fail", cleaned)
 
+    def _parse_pass_fail_result(self, raw: str) -> tuple[str, str]:
+        """Parse a PASS/FAIL response. Returns (verdict, detail).
+        verdict is one of: "pass", "fail"
+        """
+        cleaned = raw.strip()
+        no_stars = cleaned.replace("*", "")
+
+        verdict_match = re.search(
+            r"Verdict\s*:\s*(PASS|FAIL)",
+            no_stars,
+            re.IGNORECASE,
+        )
+        if verdict_match:
+            v = verdict_match.group(1).upper()
+            if v == "PASS":
+                return ("pass", "")
+            detail = cleaned[verdict_match.end():]
+            detail = detail.lstrip(":").lstrip("*").strip()
+            return ("fail", detail or cleaned)
+
+        for line in cleaned.split("\n"):
+            line = line.strip().strip("*").strip("-").strip()
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith("PASS"):
+                return ("pass", "")
+            if upper.startswith("FAIL"):
+                detail = line.split(":", 1)[1].strip() if ":" in line else cleaned
+                return ("fail", detail)
+
+        upper_all = cleaned.upper()
+        if "FAIL" in upper_all:
+            return ("fail", cleaned)
+        if "PASS" in upper_all:
+            return ("pass", "")
+        return ("fail", cleaned)
+
     def _self_evaluate_note(
         self, post_with_context: PostWithContext, note_text: str
     ) -> tuple[str, str, str]:
@@ -647,6 +697,37 @@ class AINoteGenerator:
         logger.info("Self-evaluation response: %s", raw)
         verdict, detail = self._parse_eval_result(raw)
         return (verdict, detail, raw)
+
+    def _check_char_reduction_quality(
+        self, post_with_context_description: str, original_note: str, shortened_note: str
+    ) -> tuple[str, str]:
+        """Returns (verdict, feedback). verdict is "pass" or "fail"."""
+        provider = self.config.ai_provider.lower()
+        prompt = self._get_prompt_for_char_reduction_check(
+            post_with_context_description, original_note, shortened_note
+        )
+        sys_prompt = self._p("system_prompts", "char_reduction_check")
+
+        try:
+            if provider in {"claude", "claude_agent", "claude-agent"}:
+                raw = self._claude_completion(prompt=prompt, system_prompt=sys_prompt)
+            else:
+                payload: dict[str, Any] = {
+                    "model": self.config.ai_model,
+                    "temperature": 0.1,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                raw = self._chat_completion(payload)
+        except Exception as ex:
+            logger.warning("Char reduction quality check failed: %s", ex)
+            return ("pass", "")
+
+        logger.info("Char reduction check response: %s", raw)
+        verdict, detail = self._parse_pass_fail_result(raw)
+        return (verdict, detail)
 
     def _rewrite_note(
         self,
@@ -787,6 +868,54 @@ class AINoteGenerator:
             draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
             reason = f"self_eval_failed_after_rewrite: {detail}" if rewrite_count > 0 else f"self_eval_failed: {detail}"
             return NoteGenerationResult(draft=draft, reason=reason, rewrite_count=rewrite_count)
+
+        # ── Char count enforcement (post-PASS) ──
+        max_char_rewrites = 2
+        char_rewrite_count = 0
+        pre_shorten_note = note_text
+
+        while self._count_note_chars(note_text) > 280 and char_rewrite_count < max_char_rewrites:
+            char_rewrite_count += 1
+            char_count = self._count_note_chars(note_text)
+            feedback = self._p("prompts", "char_count_feedback").format(char_count=char_count)
+            rewrite_history.append({"note": note_text, "feedback": feedback})
+            logger.info(
+                "Note over char limit (%d/280), rewriting (%d/%d)",
+                char_count, char_rewrite_count, max_char_rewrites,
+            )
+            rewritten = self._rewrite_note(post_with_context, rewrite_history, search_results)
+            if rewritten is None:
+                break
+            note_text = rewritten
+
+        rewrite_count += char_rewrite_count
+
+        if self._count_note_chars(note_text) > 280:
+            draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+            return NoteGenerationResult(draft=draft, reason="over_char_limit", rewrite_count=rewrite_count)
+
+        # ── Info loss check after shortening ──
+        if pre_shorten_note != note_text:
+            quality_verdict, quality_feedback = self._check_char_reduction_quality(
+                description, pre_shorten_note, note_text
+            )
+            if quality_verdict == "fail":
+                rewrite_count += 1
+                rewrite_history.append({"note": note_text, "feedback": quality_feedback})
+                logger.info("Char reduction info loss detected, rewriting: %s", quality_feedback)
+                rewritten = self._rewrite_note(post_with_context, rewrite_history, search_results)
+                if (
+                    rewritten is not None
+                    and self._count_note_chars(rewritten) <= 280
+                    and self._extract_urls(rewritten)
+                    and "#" not in rewritten
+                ):
+                    note_text = rewritten
+                else:
+                    draft = AINoteDraft(note_text=note_text, misleading_tags=["missing_important_context"])
+                    return NoteGenerationResult(
+                        draft=draft, reason="char_reduction_info_loss", rewrite_count=rewrite_count
+                    )
 
         draft = AINoteDraft(
             note_text=note_text,

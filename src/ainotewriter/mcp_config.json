@@ -3,10 +3,6 @@
     "pdf-reader": {
       "command": "npx",
       "args": ["@sylphx/pdf-reader-mcp"]
-    },
-    "note-tools": {
-      "command": "python",
-      "args": ["-m", "ainotewriter.mcp_server"]
     }
   }
 }
