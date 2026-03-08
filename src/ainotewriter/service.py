@@ -543,14 +543,14 @@ class CommunityNoteWriterService:
                 "claim_opinion_high": {
                     "count": claim_high,
                     "rate_percent": round(claim_high_rate, 2),
-                    "threshold": "<= 30.0%",
-                    "passed": claim_high_rate <= 30.0,
+                    "threshold": ">= 30.0%",
+                    "passed": claim_high_rate >= 30.0,
                 },
                 "claim_opinion_low": {
                     "count": claim_low,
                     "rate_percent": round(claim_low_rate, 2),
-                    "threshold": ">= 30.0%",
-                    "passed": claim_low_rate >= 30.0,
+                    "threshold": "<= 30.0%",
+                    "passed": claim_low_rate <= 30.0,
                 },
                 "url_validity_high": {
                     "count": url_high,
@@ -566,8 +566,8 @@ class CommunityNoteWriterService:
                 },
             },
             "all_requirements_passed": (
-                claim_high_rate <= 30.0
-                and claim_low_rate >= 30.0
+                claim_high_rate >= 30.0
+                and claim_low_rate <= 30.0
                 and url_high_rate >= 95.0
                 and harassment_high_rate >= 98.0
             ),
