@@ -79,8 +79,11 @@
   },
   "dynamic_rules": {
     "write_in_post_language": {
-      "ja": "- ノート本文は投稿の言語で書くこと",
-      "en": "- Write the note body in the language of the posts"
+        "ja": "- ノート本文は投稿の言語で書くこと",
+        "en": "- Write the note body in the language of the posts"
+    },
+    "write_in_english": {
+        "en": "- Write the note body in English, regardless of any other language context."
     }
   }
 }

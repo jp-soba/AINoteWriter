@@ -48,6 +48,7 @@ class NoteGenerationResult:
 class AINoteGenerator:
     def __init__(self, config: AppConfig, feed_lang: str | None = None):
         self.config = config
+        self.feed_lang = feed_lang
         self.lang = "ja" if feed_lang == "ja" else "en"
 
     def _p(self, category: str, key: str) -> str:
@@ -404,8 +405,11 @@ class AINoteGenerator:
 
     def _get_note_text_rules(self, for_writing: bool = False) -> str:
         rules = self._p("prompts", "note_text_rules")
-        if for_writing and self.lang != "ja":
-            rules += "\n" + self._p("dynamic_rules", "write_in_post_language")
+        if for_writing:
+            if self.feed_lang == "all":
+                rules += "\n" + self._p("dynamic_rules", "write_in_post_language")
+            elif self.lang != "ja":
+                rules += "\n" + self._p("dynamic_rules", "write_in_english")
         return rules
 
     def _get_prompt_for_note_writing(
