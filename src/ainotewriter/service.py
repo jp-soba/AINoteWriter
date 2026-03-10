@@ -234,18 +234,31 @@ class CommunityNoteWriterService:
                     evaluation = {"error": str(eval_ex)}
 
             progress_label = f"{idx}/{total}"
-            _send_discord_notification(
-                webhook_url=self.config.discord_webhook_url,
-                post_id=pwc.post.post_id,
-                note_text=draft.note_text,
-                evaluation=evaluation,
-                test_mode=test_mode,
-                progress_label=progress_label,
-                rewrite_count=gen_result.rewrite_count,
-            )
+            url_check_pending = submit_notes and enable_url_check
+            if not url_check_pending:
+                _send_discord_notification(
+                    webhook_url=self.config.discord_webhook_url,
+                    post_id=pwc.post.post_id,
+                    note_text=draft.note_text,
+                    evaluation=evaluation,
+                    test_mode=test_mode,
+                    progress_label=progress_label,
+                    rewrite_count=gen_result.rewrite_count,
+                )
 
             if score is not None and score < min_claim_opinion_score:
                 _progress(f"Skipped: claim_opinion_score too low ({score})")
+                if url_check_pending:
+                    _send_discord_notification(
+                        webhook_url=self.config.discord_webhook_url,
+                        post_id=pwc.post.post_id,
+                        note_text=draft.note_text,
+                        evaluation=evaluation,
+                        test_mode=test_mode,
+                        progress_label=progress_label,
+                        rewrite_count=gen_result.rewrite_count,
+                        skipped_reason=f"claim_opinion_score too low: {score}",
+                    )
                 with lock:
                     results.append(
                         NoteProcessResult(
@@ -296,12 +309,27 @@ class CommunityNoteWriterService:
 
                     if not ok:
                         _progress(f"Skipped: invalid URLs: {', '.join(bad_urls)}")
+                        skip_reason = f"Invalid URLs: {', '.join(bad_urls)}"
+                        if evaluation is None:
+                            evaluation = {}
+                        if isinstance(evaluation, dict):
+                            evaluation.setdefault("data", {})["invalid_urls"] = bad_urls
+                        _send_discord_notification(
+                            webhook_url=self.config.discord_webhook_url,
+                            post_id=pwc.post.post_id,
+                            note_text=draft.note_text,
+                            evaluation=evaluation,
+                            test_mode=test_mode,
+                            progress_label=progress_label,
+                            rewrite_count=gen_result.rewrite_count,
+                            skipped_reason=skip_reason,
+                        )
                         with lock:
                             results.append(
                                 NoteProcessResult(
                                     post_id=pwc.post.post_id,
                                     status="skipped",
-                                    reason=f"Invalid URLs: {', '.join(bad_urls)}",
+                                    reason=skip_reason,
                                     generated_note=draft.note_text,
                                     claim_opinion_score=score,
                                 )
@@ -316,6 +344,16 @@ class CommunityNoteWriterService:
                 )
                 submission = self.x_client.submit_note(note=note, test_mode=test_mode)
                 _progress("Submitted")
+                if url_check_pending:
+                    _send_discord_notification(
+                        webhook_url=self.config.discord_webhook_url,
+                        post_id=pwc.post.post_id,
+                        note_text=draft.note_text,
+                        evaluation=evaluation,
+                        test_mode=test_mode,
+                        progress_label=progress_label,
+                        rewrite_count=gen_result.rewrite_count,
+                    )
                 with lock:
                     results.append(
                         NoteProcessResult(

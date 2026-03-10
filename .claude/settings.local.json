@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from ainotewriter.cli import main; print\\(''import OK''\\)\")"
+    ]
+  }
+}
