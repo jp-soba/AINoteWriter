@@ -36,7 +36,7 @@ on:
       feed_lang:
         description: "Feed language filter (ja, all, or empty for English only)"
         required: false
-        default: ""
+        default: "ja"
   schedule:
     - cron: "*/30 * * * *"
 
@@ -82,7 +82,7 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          FEED_LANG="${{ github.event.inputs.feed_lang }}"
+          FEED_LANG="${{ github.event.inputs.feed_lang || 'ja' }}"
           FEED_LANG_ARG=""
           if [ -n "$FEED_LANG" ]; then
             FEED_LANG_ARG="--feed-lang $FEED_LANG"
