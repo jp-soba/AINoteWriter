@@ -33,6 +33,10 @@
       "en": "A Community Note for the following post was shortened due to the character limit. Evaluate whether the shortened note has lost any important factual information or source URLs that were in the original.\n\nEvaluation criteria:\n- Are any factual claims from the original missing in the shortened version?\n- Are any source URLs from the original missing in the shortened version?\n- Has the accuracy of the facts been compromised by shortening?\n- Minor wording differences are acceptable\n\nVerdict:\n- If there are no issues, return only \"PASS\".\n- If important information or URLs are missing, return \"FAIL: specific issues and improvement instructions\". If fully restoring information within the 280-character limit is difficult, you may suggest reducing the number of points covered.\n\n[Post]\n{post_description}\n\n[Before shortening]\n{original_note}\n\n[After shortening]\n{shortened_note}"
     }
   },
+  "common_claude_system": {
+    "ja": "サブエージェント（Agentツール）を使用しないでください。",
+    "en": "Do NOT use subagents (Agent tool)."
+  },
   "system_prompts": {
     "pre_filter": {
       "ja": "あなたは投稿の分類器です。指示に従い、YESかNOのみで回答してください。",

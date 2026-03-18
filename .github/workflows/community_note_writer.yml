@@ -33,6 +33,10 @@ on:
         description: "Timeout (seconds) for URL checks"
         required: false
         default: "5"
+      ai_model:
+        description: "AI model to use (e.g. sonnet, opus)"
+        required: false
+        default: "opus"
       feed_lang:
         description: "Feed language filter (ja, all, or empty for English only)"
         required: false
@@ -78,7 +82,8 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           AI_PROVIDER: claude_agent
           AI_TIMEOUT_SEC: "300"
-          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_MODEL: ${{ github.event.inputs.ai_model || vars.AI_MODEL || 'opus' }}
+          CLAUDE_CODE_SUBAGENT_MODEL: ${{ github.event.inputs.ai_model || vars.AI_MODEL || 'opus' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |

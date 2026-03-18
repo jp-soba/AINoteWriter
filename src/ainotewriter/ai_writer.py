@@ -212,6 +212,8 @@ class AINoteGenerator:
             try:
                 option_sig = inspect.signature(options_cls)
                 option_kwargs: dict[str, Any] = {}
+                if "model" in option_sig.parameters and self.config.ai_model:
+                    option_kwargs["model"] = self.config.ai_model
                 if "max_turns" in option_sig.parameters:
                     option_kwargs["max_turns"] = self.config.claude_max_turns
                 if "system_prompt" in option_sig.parameters:
@@ -297,6 +299,10 @@ class AINoteGenerator:
             "--output-format", "stream-json",
             "--verbose",
         ]
+        if self.config.ai_model:
+            cmd += ["--model", self.config.ai_model]
+        if self.config.ai_model:
+            cmd += ["--model", self.config.ai_model]
         cmd += self._build_cli_tool_args(allow_web_tools)
 
         proc = subprocess.run(
@@ -324,6 +330,8 @@ class AINoteGenerator:
 
         full_prompt = f"{system_prompt}\n\n{prompt}".strip()
         cmd = [self.config.claude_cli_path, "--print"]
+        if self.config.ai_model:
+            cmd += ["--model", self.config.ai_model]
         cmd += self._build_cli_tool_args(allow_web_tools)
         proc = subprocess.run(
             cmd,
@@ -347,6 +355,9 @@ class AINoteGenerator:
         self, prompt: str, system_prompt: str, *,
         allow_web_tools: bool = False, images: list[str] | None = None
     ) -> str:
+        common = _PROMPTS.get("common_claude_system", {}).get(self.lang, "")
+        if common:
+            system_prompt = f"{common}\n\n{system_prompt}"
         if images:
             return self._run_claude_cli_prompt(
                 prompt, system_prompt, allow_web_tools=allow_web_tools, images=images
