@@ -39,8 +39,10 @@ jobs:
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
         run: |
+          # Convert literal \n in input to actual newlines
+          NOTE_TEXT=$(printf '%b' "${{ github.event.inputs.note_text }}")
           ai-note-writer submit \
             --post-id "${{ github.event.inputs.post_id }}" \
-            --note-text "${{ github.event.inputs.note_text }}" \
+            --note-text "$NOTE_TEXT" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
             --evaluate=true
