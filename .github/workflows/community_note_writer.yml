@@ -87,14 +87,14 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          FEED_LANG="${{ github.event.inputs.feed_lang || 'ja' }}"
+          FEED_LANG="${{ github.event.inputs.feed_lang || '' }}"
           FEED_LANG_ARG=""
           if [ -n "$FEED_LANG" ]; then
             FEED_LANG_ARG="--feed-lang $FEED_LANG"
           fi
 
           ai-note-writer run \
-            --num-posts "${{ github.event.inputs.num_posts || '5' }}" \
+            --num-posts "${{ github.event.inputs.num_posts || '10' }}" \
             --test-mode=${{ github.event.inputs.test_mode || 'true' }} \
             --submit-notes=${{ github.event.inputs.submit_notes || 'true' }} \
             --evaluate-before-submit=${{ github.event.inputs.evaluate_before_submit || 'true' }} \
